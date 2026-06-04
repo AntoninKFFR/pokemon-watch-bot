@@ -1,0 +1,21 @@
+keyword,market_price_eur,max_buy_price_yen,category,price_source,confidence,reason
+アビスアイ,0,0,sealed,manual_to_verify,LOW,Observed 7 NEEDS_PRICE listing(s); examples: ポケモンカードゲーム ドリームex 3BOXシユリンク付き アビスアイ 1BOXペリペリ 合計 4BOX。^_^ | ポケモンカードゲーム MEGA アビスアイ 1BOX [新品・シュリンクも未開封
+MEGAドリームex,0,0,sealed,manual_to_verify,LOW,Observed 3 NEEDS_PRICE listing(s); examples: ポケモンカードゲーム MEGA ハイクラスパック MEGAドリームex 1BOX シュリンク付 新品未開封 | MEGA ハイクラスパック MEGAドリームex BOX 1BOX ポケモンカードゲーム ポケモンカードゲーム 1BOX 新品未開封
+メガシンフォニア,0,0,sealed,manual_to_verify,LOW,Observed 3 NEEDS_PRICE listing(s); examples: ポケモンカードゲーム メガブレイブ メガシンフォニア 各1BOX シュリンク付き未開封品 | ポケモンカードゲーム メガブレイブ メガシンフォニア ポケモンカード 各1BOX シュリンク付き 新品未開封！！
+シャイニートレジャー,0,0,sealed,manual_to_verify,LOW,Observed 2 NEEDS_PRICE listing(s); examples: 【 ARS鑑定 10+ 】ニャオハ ミラー 012/190 ポケモンカードゲーム ポケカ シャイニートレジャーex PSA BGS ARS 鑑定品 PSA10 ARS10＋ | ポケモンカード PSA10 ピカチュウ シャイニートレジャーex 色違い
+スペシャルBOX,0,0,sealed,manual_to_verify,LOW,Observed 2 NEEDS_PRICE listing(s); examples: 【新品未開封】ポケモンカードゲーム スペシャルBOX フクオカ Pokmon Center FUKUOKA 限定 | スペシャルBOX ポケモンセンターヒロシマ ポケモンカードゲーム 未開封 シュリンク付 ポケモンカードゲーム スペシャルBOX ヒロシマ
+クレイバースト,0,0,sealed,manual_to_verify,LOW,Observed 1 NEEDS_PRICE listing(s); examples: 1円スタート ナンジャモ SAR PSA10 ポケモンカード クレイバースト
+レイジングサーフ,0,0,sealed,manual_to_verify,LOW,Observed 1 NEEDS_PRICE listing(s); examples: ポケモンカードゲーム 強化拡張パック レイジングサーフ 1BOX シュリンク付き
+黒炎の支配者,0,0,sealed,manual_to_verify,LOW,Observed 1 NEEDS_PRICE listing(s); examples: 1スタ】ポケモンカード未開封boxまとめ売り 8セット アビスアイ、ニンジャスピナー、ルリナの休息、ムニキスゼロ、黒炎の支配者
+VMAXクライマックス,0,0,sealed,manual_to_verify,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+VSTARユニバース,0,0,sealed,manual_to_verify,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+イーブイヒーローズ,0,0,sealed,manual_to_verify,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+双璧のファイター,0,0,sealed,manual_to_verify,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+スノーハザード,0,0,sealed,manual_to_verify,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+白熱のアルカナ,0,0,sealed,manual_to_verify,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+蒼空ストリーム,0,0,sealed,manual_to_verify,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+ロストアビス,0,0,sealed,manual_to_verify,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+メガブレイブ,0,0,sealed,manual_to_verify,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+ムニキスゼロ,0,0,unknown_or_suspect,manual,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+フクオカ,0,0,unknown_or_suspect,manual,LOW,Fallback keyword to verify manually before adding trusted market pricing.
+ヒロシマ,0,0,unknown_or_suspect,manual,LOW,Fallback keyword to verify manually before adding trusted market pricing.
