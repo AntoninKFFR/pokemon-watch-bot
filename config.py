@@ -8,6 +8,13 @@ from __future__ import annotations
 import os
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def project_path(*parts: str) -> str:
+    return os.path.join(BASE_DIR, *parts)
+
+
 def env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -15,8 +22,8 @@ def env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 # ----- Runtime paths -----
-DATABASE_PATH = "deals.db"
-CSV_EXPORT_PATH = "pokemon_deals_export.csv"
+DATABASE_PATH = project_path("deals.db")
+CSV_EXPORT_PATH = project_path("pokemon_deals_export.csv")
 
 # ----- Yahoo Auctions scraping -----
 REQUEST_TIMEOUT_SECONDS = 30
@@ -76,7 +83,7 @@ MAX_TELEGRAM_ALERTS_PER_RUN = 7
 GOOGLE_SHEETS_ENABLED = env_bool("GOOGLE_SHEETS_ENABLED", False)
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Pokemon Deals Watch")
 GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "Historique")
-GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "google_service_account.json")
+GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", project_path("google_service_account.json"))
 PREFER_BUY_NOW = env_bool("PREFER_BUY_NOW", True)
 ENDING_SOON_MINUTES = 180
 ENDING_VERY_SOON_MINUTES = 60

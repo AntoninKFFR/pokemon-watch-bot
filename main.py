@@ -3366,15 +3366,71 @@ def sort_rows_for_watch(rows: List[Dict[str, str]], hide_skip: bool, prefer_buy_
     return filtered
 
 
+def strategic_rank(row: Dict[str, str]) -> int:
+    title = row.get("title", "")
+    matched_product = row.get("matched_product_japanese", "")
+    risk_flags = str(row.get("risk_flags", "") or "")
+    if is_sealed_box_or_display(title, matched_product):
+        return 0
+    if "GOOD_CONDITION_LOOSE" in risk_flags:
+        return 1
+    if "OLD_BACK_LOT" in risk_flags:
+        return 2
+    return 3
+
+
+def _parse_iso_sort_value(value: str) -> float:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return 0.0
+    try:
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1] + "+00:00"
+        return dt.datetime.fromisoformat(cleaned).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def sort_by_auction_urgency(row: Dict[str, str], sheet_type: str) -> tuple:
+    listing_type = row.get("listing_type", LISTING_TYPE_UNKNOWN)
+    ended = is_row_auction_ended(row)
+    minutes_raw = row.get("time_left_minutes", "")
+    minutes_known = minutes_raw not in ("", None)
+    minutes_value = int(to_float(minutes_raw)) if minutes_known else 10**9
+    roi_part = -to_float(row.get("roi_percent", 0.0))
+    profit_part = -to_float(row.get("profit_eur", 0.0))
+    quality_part = -to_float(row.get("deal_quality_score", 0.0))
+    price_part = to_float(row.get("price_yen", 0.0))
+    created_part = -_parse_iso_sort_value(str(row.get("created_at", "") or ""))
+
+    if ended:
+        base_group = 9 if sheet_type == "historique" else 99
+    elif listing_type in (LISTING_TYPE_AUCTION, LISTING_TYPE_LOW_START_AUCTION):
+        base_group = 0 if minutes_known else 1
+    elif listing_type in (LISTING_TYPE_BUY_NOW, LISTING_TYPE_FIXED_PRICE):
+        base_group = 2
+    else:
+        base_group = 3
+
+    return (
+        base_group,
+        minutes_value if base_group == 0 else 10**9,
+        roi_part,
+        profit_part,
+        quality_part,
+        created_part,
+        price_part,
+    )
+
+
 def sort_deals_rows(rows: List[Dict[str, str]], prefer_buy_now: bool) -> List[Dict[str, str]]:
     sorted_rows = list(rows)
 
     def sort_key(row: Dict[str, str]) -> tuple:
+        urgency_part = sort_by_auction_urgency(row, sheet_type="historique")
         decision_part = decision_rank(row.get("decision", DECISION_SKIP))
         type_part = listing_type_rank(row.get("listing_type", LISTING_TYPE_UNKNOWN)) if prefer_buy_now else 99
-        roi_part = -to_float(row.get("roi_percent", 0.0))
-        profit_part = -to_float(row.get("profit_eur", 0.0))
-        return (type_part, decision_part, roi_part, profit_part)
+        return urgency_part + (decision_part, type_part)
 
     sorted_rows.sort(key=sort_key)
     return sorted_rows
@@ -3394,33 +3450,15 @@ def sort_best_deals_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
         )
     ]
 
-    def strategic_rank(row: Dict[str, str]) -> int:
-        title = row.get("title", "")
-        matched_product = row.get("matched_product_japanese", "")
-        risk_flags = str(row.get("risk_flags", "") or "")
-        if is_sealed_box_or_display(title, matched_product):
-            return 0
-        if "GOOD_CONDITION_LOOSE" in risk_flags:
-            return 1
-        if "OLD_BACK_LOT" in risk_flags:
-            return 2
-        return 3
-
     def sort_key(row: Dict[str, str]) -> tuple:
         manual_price = to_float(row.get("manual_market_price_eur", ""))
         roi = to_float(row.get("roi_percent", 0.0))
-        profit = to_float(row.get("profit_eur", 0.0))
-        minutes_raw = row.get("time_left_minutes", "")
-        minutes_known = minutes_raw not in ("", None)
-        minutes_value = int(to_float(minutes_raw)) if minutes_known else 10**9
+        urgency_part = sort_by_auction_urgency(row, sheet_type="opportunites")
         return (
-            decision_rank(row.get("decision", DECISION_SKIP)),
+            urgency_part,
             0 if manual_price > 0 and roi > 0 else 1,
+            decision_rank(row.get("decision", DECISION_SKIP)),
             strategic_rank(row),
-            0 if minutes_known else 1,
-            minutes_value,
-            -roi,
-            -profit,
         )
 
     best_rows.sort(key=sort_key)
@@ -3478,6 +3516,7 @@ def sort_needs_price_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
 
     def sort_key(row: Dict[str, str]) -> tuple:
         return (
+            sort_by_auction_urgency(row, sheet_type="prix_a_remplir"),
             needs_price_priority(row),
             -to_float(row.get("deal_quality_score", 0.0)),
             -to_float(row.get("roi_percent", 0.0)),
@@ -5093,6 +5132,7 @@ def _sync_mode_emploi_worksheet(spreadsheet: object) -> bool:
         [""],
         ["Historique"],
         ["Historique complet / debug, utile pour contrôler les annonces ignorées ou déjà terminées."],
+        ["Les tableaux sont triés pour afficher en priorité les enchères qui se terminent le plus vite. Les enchères terminées restent uniquement dans Historique et sont placées tout en bas."],
         [""],
         ["Définitions utiles"],
         ["Prix Japon ¥ = prix utilisé pour calculer le coût."],
