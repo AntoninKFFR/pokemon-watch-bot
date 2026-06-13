@@ -12,3 +12,4 @@ bot.log
 *.db
 credentials.json
 token.json
+detail_enrichment_log.csv
