@@ -48,6 +48,10 @@ class ParsedListing:
     buy_now_price_yen: Optional[int] = None
     bid_count: Optional[int] = None
     time_left: str = ""
+    time_left_minutes: Optional[int] = None
+    auction_end_at: str = ""
+    auction_ending_soon: str = ""
+    auction_is_ended: bool = False
     seller_name: str = ""
     seller_rating: str = ""
     shipping_japan: str = ""
@@ -76,6 +80,20 @@ class ScoredDeal:
     matched_market_keyword: str
     market_price_source: str
     market_price_confidence: str
+    price_source: str
+    current_price_yen: Optional[int]
+    buy_now_price_yen: Optional[int]
+    bid_count: Optional[int]
+    time_left: str
+    time_left_minutes: Optional[int]
+    auction_end_at: str
+    auction_ending_soon: str
+    time_left_source: str
+    raw_time_left_text: str
+    auction_is_ended: bool
+    seller_name: str
+    seller_rating: str
+    shipping_japan: str
     detected_at: str
 
 
@@ -130,7 +148,62 @@ BUYOUT_PRICE_RE = re.compile(r"即決\s*[0-9,]+\s*円")
 CURRENT_PRICE_RE = re.compile(r"現在\s*([0-9,]+)\s*円")
 BUY_NOW_PRICE_RE = re.compile(r"即決\s*([0-9,]+)\s*円")
 BID_COUNT_RE = re.compile(r"入札\s*([0-9,]+)")
-TIME_LEFT_RE = re.compile(r"残り\s*([^\s|]+)")
+ZENMARKET_CURRENT_PRICE_RE = re.compile(
+    r"(?:Current price|Current bid|Prix actuel|Ench[eè]re actuelle|現在価格|入札価格)\s*(?:\[[^\]]*\])?\s*(?:\*+)?\s*"
+    r"(?:\n|\r|\s)*[¥￥]\s*([0-9,]+)",
+    re.IGNORECASE,
+)
+ZENMARKET_BUY_NOW_PRICE_RE = re.compile(
+    r"(?:Buyout price|Buy now|Instant purchase|Prix d['’]achat imm[eé]diat|Acheter maintenant|即決価格|即決|Buyout)\s*"
+    r"(?:\[[^\]]*\])?\s*(?:\*+)?\s*(?:\n|\r|\s)*[¥￥]\s*([0-9,]+)",
+    re.IGNORECASE,
+)
+ZENMARKET_BID_COUNT_RE = re.compile(
+    r"(?:Number of bids|Bid count|Nombre d['’]ench[eè]res|入札件数|入札)\s*:?\**\s*([0-9,]+)",
+    re.IGNORECASE,
+)
+ZENMARKET_ENDS_AT_RE = re.compile(
+    r"Ends in:\**\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4}\s+[0-9:]+\s*[AP]M)\**\s*\(Tokyo\)",
+    re.IGNORECASE,
+)
+ZENMARKET_CURRENT_TIME_RE = re.compile(
+    r"Current time:\**\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4}\s+[0-9:]+\s*[AP]M)\**\s*\(Tokyo\)",
+    re.IGNORECASE,
+)
+ZENMARKET_TIME_LEFT_RE = re.compile(
+    r"(?:This auction ends in:|Time left|Temps restant|残り時間)\s*(?:\n|\r|\s|\*){0,20}([^\n\r*]{1,40})",
+    re.IGNORECASE,
+)
+ZENMARKET_SHIPPING_RE = re.compile(
+    r"Shipping within Japan:\**\s*([^\n\r*]{1,40})",
+    re.IGNORECASE,
+)
+JP_DURATION_RE = re.compile(
+    r"([0-9０-９]+\s*日(?:\s*[0-9０-９]+\s*時間)?(?:\s*[0-9０-９]+\s*分)?|"
+    r"[0-9０-９]+\s*時間(?:\s*[0-9０-９]+\s*分)?|"
+    r"[0-9０-９]+\s*分)"
+)
+EN_DURATION_RE = re.compile(
+    r"(\d+\s*days?(?:\s*\d+\s*hours?)?(?:\s*\d+\s*minutes?)?|"
+    r"\d+\s*hours?(?:\s*\d+\s*minutes?)?|"
+    r"\d+\s*minutes?|"
+    r"\d+\s*h(?:\s*\d+\s*m)?|"
+    r"\d+\s*m\b)",
+    re.IGNORECASE,
+)
+TIME_LEFT_CONTEXT_RE = re.compile(
+    r"(?:残り時間|残り|あと|time left|ends in|ending soon|ended)[^|]{0,64}",
+    re.IGNORECASE,
+)
+END_TIME_RE = re.compile(
+    r"(?:終了日時|終了予定|deadline|auction_end_time|end_time)[^0-9]*"
+    r"(?:(?P<year>\d{4})年)?\s*(?P<month>\d{1,2})月\s*(?P<day>\d{1,2})日"
+    r"(?:[^0-9]+)?(?P<hour>\d{1,2})時(?:\s*(?P<minute>\d{1,2})分)?"
+)
+END_TIME_FALLBACK_RE = re.compile(
+    r"(?:(?P<year>\d{4})年)?\s*(?P<month>\d{1,2})月\s*(?P<day>\d{1,2})日"
+    r"(?:[^0-9]+)?(?P<hour>\d{1,2})時(?:\s*(?P<minute>\d{1,2})分)?\s*終了"
+)
 SELLER_RE = re.compile(r"出品者[:：]\s*([^\s|]+)")
 SELLER_RATING_RE = re.compile(r"評価[:：]\s*([0-9.]+)")
 
@@ -141,6 +214,7 @@ DB_EXPORT_COLUMNS = [
     "query",
     "rule_name",
     "price_yen",
+    "price_source",
     "market_price_eur",
     "max_buy_price_yen",
     "total_cost_yen",
@@ -161,31 +235,48 @@ DB_EXPORT_COLUMNS = [
     "auto_price_sample_size",
     "auto_price_raw_summary",
     "auto_price_last_checked",
+    "current_price_yen",
+    "buy_now_price_yen",
+    "bid_count",
+    "time_left",
+    "time_left_minutes",
+    "auction_end_at",
+    "auction_ending_soon",
+    "time_left_source",
+    "raw_time_left_text",
+    "auction_is_ended",
+    "seller_name",
+    "seller_rating",
+    "shipping_japan",
     "detected_at",
 ]
 
-GOOGLE_DEALS_WORKSHEET_NAME = "Deals"
+GOOGLE_DEALS_WORKSHEET_NAME = "Historique"
+GOOGLE_MODE_EMPLOI_WORKSHEET_NAME = "Mode d’emploi"
+GOOGLE_LEGACY_DEALS_WORKSHEET_NAME = "Deals"
 GOOGLE_DEALS_HEADERS = [
     "created_at",
-    "decision",
-    "manual_action_needed",
-    "listing_type",
+    "opportunity_type",
     "title",
+    "time_left",
+    "time_left_minutes",
+    "auction_ending_soon",
+    "auction_is_ended",
     "price_yen",
+    "current_price_yen",
+    "buy_now_price_yen",
+    "bid_count",
     "total_cost_eur",
-    "manual_market_price_eur",
     "market_price_eur",
     "profit_eur",
     "roi_percent",
+    "price_source",
+    "time_left_source",
+    "risk_flags",
+    "deal_quality_score",
     "link_for_zenmarket",
-    "cardmarket_search_url",
-    "ebay_sold_search_url",
-    "notes",
     "url",
-    "buy_now_price_yen",
-    "current_price_yen",
-    "bid_count",
-    "time_left",
+    "notes",
     "seller_name",
     "seller_rating",
     "shipping_japan",
@@ -193,17 +284,9 @@ GOOGLE_DEALS_HEADERS = [
     "rule_name",
     "data_source",
     "listing_type_reason",
-    "max_buy_price_yen",
-    "total_cost_yen",
-    "vat_eur",
-    "landed_cost_eur",
-    "safe_resale_eur",
     "matched_market_keyword",
     "market_price_source",
     "market_price_confidence",
-    "manual_price_source",
-    "manual_price_confidence",
-    "manual_status",
     "auto_price_used",
     "auto_price_source",
     "auto_price_sample_size",
@@ -215,32 +298,27 @@ GOOGLE_DEALS_HEADERS = [
     "cardmarket_query",
     "ebay_query",
     "pricecharting_query",
-    "pricecharting_search_url",
     "auction_warning",
-    "risk_flags",
     "score",
     "score_reliability",
-    "deal_quality_score",
 ]
 
 GOOGLE_BEST_DEALS_HEADERS = [
     "created_at",
-    "decision",
-    "manual_action_needed",
-    "listing_type",
+    "opportunity_type",
     "title",
+    "time_left",
+    "time_left_minutes",
+    "auction_ending_soon",
     "price_yen",
+    "current_price_yen",
+    "buy_now_price_yen",
     "total_cost_eur",
-    "manual_market_price_eur",
     "market_price_eur",
     "profit_eur",
     "roi_percent",
-    "manual_price_source",
-    "manual_price_confidence",
-    "manual_status",
+    "price_source",
     "link_for_zenmarket",
-    "cardmarket_search_url",
-    "ebay_sold_search_url",
     "notes",
     "url",
 ]
@@ -274,10 +352,14 @@ GOOGLE_AUCTIONS_WATCH_HEADERS = [
     "manual_action_needed",
     "listing_type",
     "title",
+    "time_left",
+    "time_left_minutes",
+    "auction_ending_soon",
+    "auction_is_ended",
     "price_yen",
+    "buy_now_price_yen",
     "current_price_yen",
     "bid_count",
-    "time_left",
     "total_cost_eur",
     "manual_market_price_eur",
     "market_price_eur",
@@ -295,15 +377,17 @@ GOOGLE_AUCTIONS_WATCH_HEADERS = [
 
 GOOGLE_NEEDS_PRICE_HEADERS = [
     "created_at",
-    "manual_action_needed",
-    "listing_type",
+    "opportunity_type",
     "title",
+    "time_left",
+    "time_left_minutes",
+    "auction_ending_soon",
     "price_yen",
+    "current_price_yen",
+    "buy_now_price_yen",
     "total_cost_eur",
     "manual_market_price_eur",
-    "manual_price_source",
-    "manual_price_confidence",
-    "manual_status",
+    "price_source",
     "cardmarket_search_url",
     "ebay_sold_search_url",
     "pricecharting_search_url",
@@ -312,21 +396,46 @@ GOOGLE_NEEDS_PRICE_HEADERS = [
     "url",
 ]
 
-GOOGLE_BEST_WORKSHEET_NAME = "Best Deals"
+GOOGLE_BEST_WORKSHEET_NAME = "Opportunités"
 GOOGLE_BUY_NOW_WORKSHEET_NAME = "Buy Now Deals"
 GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME = "Auctions Watch"
-GOOGLE_NEEDS_PRICE_WORKSHEET_NAME = "Needs Price"
+GOOGLE_NEEDS_PRICE_WORKSHEET_NAME = "Prix à remplir"
+GOOGLE_LEGACY_BEST_WORKSHEET_NAME = "Best Deals"
+GOOGLE_LEGACY_NEEDS_PRICE_WORKSHEET_NAME = "Needs Price"
+DETAIL_ENRICHMENT_LOG_PATH = "detail_enrichment_log.csv"
+FINAL_USEFUL_DECISIONS = {
+    "NEEDS_PRICE",
+    "WATCH_AUCTION",
+    "WATCH_LOW_AUCTION",
+    "WATCH",
+    "BUY ALERT",
+}
+DOUBLE_CHECK_EXCLUDED_RISK_FLAGS = {
+    "GRADED",
+    "DAMAGED",
+    "MYSTERY_PACK",
+    "SEARCHED_PACK",
+    "OLD_CARD_SINGLE",
+}
 
 GOOGLE_HEADER_LABELS = {
     "created_at": "Date ajout",
     "decision": "Statut",
     "manual_action_needed": "Action requise",
     "listing_type": "Type annonce",
+    "opportunity_type": "Type opportunité",
     "listing_type_reason": "Raison type",
     "title": "Titre",
     "price_yen": "Prix Japon ¥",
+    "price_source": "Source prix achat",
     "current_price_yen": "Prix actuel ¥",
     "buy_now_price_yen": "Prix achat immédiat ¥",
+    "time_left_minutes": "Minutes restantes",
+    "auction_end_at": "Fin enchère",
+    "auction_ending_soon": "Fin bientôt",
+    "time_left_source": "Source temps restant",
+    "raw_time_left_text": "Texte brut temps restant",
+    "auction_is_ended": "Enchère terminée",
     "total_cost_eur": "Coût total estimé €",
     "manual_market_price_eur": "Prix revente manuel €",
     "market_price_eur": "Prix marché €",
@@ -344,7 +453,7 @@ GOOGLE_HEADER_LABELS = {
     "auction_warning": "Alerte enchère",
     "score_reliability": "Fiabilité score",
     "deal_quality_score": "Score qualité",
-    "risk_flags": "Risques",
+    "risk_flags": "Risk flags",
     "bid_count": "Nombre d'enchères",
     "time_left": "Temps restant",
     "seller_name": "Vendeur",
@@ -398,6 +507,13 @@ DISPLAY_VALUE_MAPS = {
         "LOW_START_AUCTION": "Enchère basse",
         "UNKNOWN": "Inconnu",
     },
+    "opportunity_type": {
+        "AUCTION_ONLY": "Enchère seule",
+        "AUCTION_PLUS_BUY_NOW": "Enchère + achat immédiat",
+        "BUY_NOW": "Achat immédiat",
+        "FIXED_PRICE": "Prix fixe",
+        "UNKNOWN": "Inconnu",
+    },
     "manual_price_confidence": {
         "HIGH": "Haute",
         "MEDIUM": "Moyenne",
@@ -428,6 +544,13 @@ DISPLAY_VALUE_MAPS = {
         "Manual": "Manuel",
         "Other": "Autre",
     },
+    "price_source": {
+        "zenmarket_detail": "Détail ZenMarket",
+        "yahoo_detail": "Détail Yahoo",
+        "yahoo_search": "Résultat Yahoo",
+        "sqlite_cache": "Cache SQLite",
+        "unknown": "Inconnu",
+    },
     "listing_type_reason": {
         "default_yahoo_auction": "Enchère Yahoo par défaut",
         "detected_low_start": "Enchère basse détectée",
@@ -440,9 +563,21 @@ DISPLAY_VALUE_MAPS = {
         "True": "Oui",
         "False": "Non",
     },
+    "auction_ending_soon": {
+        "VERY_SOON": "Oui, très bientôt",
+        "SOON": "Oui",
+        "NO": "Non",
+        "UNKNOWN": "Inconnu",
+        "ENDED": "Terminée",
+    },
+    "auction_is_ended": {
+        "True": "Oui",
+        "False": "Non",
+    },
 }
 RISK_FLAG_LABELS = {
     "LOW_START_AUCTION": "Enchère basse",
+    "AUCTION_ENDED": "Enchère terminée",
     "NO_SHRINK": "Sans shrink",
     "OPENED": "Ouvert",
     "EMPTY_BOX": "Boîte vide",
@@ -452,6 +587,10 @@ RISK_FLAG_LABELS = {
     "GENERIC_LOT": "Lot générique",
     "UNKNOWN_PRICE": "Prix inconnu",
     "SELLER_RISK": "Risque vendeur",
+    "GOOD_CONDITION_LOOSE": "Carte loose bon état",
+    "GRADED": "Carte gradée",
+    "OLD_CARD_SINGLE": "Vieille carte seule",
+    "OLD_BACK_LOT": "Lot 旧裏/旧裏面",
 }
 REVERSE_DISPLAY_VALUE_MAPS = {
     field: {visible: internal for internal, visible in mapping.items()}
@@ -488,6 +627,11 @@ LISTING_TYPE_FIXED_PRICE = "FIXED_PRICE"
 LISTING_TYPE_AUCTION = "AUCTION"
 LISTING_TYPE_LOW_START_AUCTION = "LOW_START_AUCTION"
 LISTING_TYPE_UNKNOWN = "UNKNOWN"
+OPPORTUNITY_TYPE_AUCTION_ONLY = "AUCTION_ONLY"
+OPPORTUNITY_TYPE_AUCTION_PLUS_BUY_NOW = "AUCTION_PLUS_BUY_NOW"
+OPPORTUNITY_TYPE_BUY_NOW = "BUY_NOW"
+OPPORTUNITY_TYPE_FIXED_PRICE = "FIXED_PRICE"
+OPPORTUNITY_TYPE_UNKNOWN = "UNKNOWN"
 LOW_START_WARNING_VALUE = "LOW_START_AUCTION"
 LOW_START_KEYWORDS = ["1円スタート！！", "1円スタート", "1円", "売り切り"]
 LISTING_TYPE_REASON_DEFAULT_YAHOO_AUCTION = "default_yahoo_auction"
@@ -499,6 +643,11 @@ LISTING_TYPE_REASON_UNKNOWN_SOURCE = "unknown_source"
 SCORE_RELIABILITY_HIGH = "HIGH"
 SCORE_RELIABILITY_MEDIUM = "MEDIUM"
 SCORE_RELIABILITY_LOW = "LOW"
+AUCTION_ENDING_VERY_SOON = "VERY_SOON"
+AUCTION_ENDING_SOON = "SOON"
+AUCTION_ENDING_NO = "NO"
+AUCTION_ENDING_UNKNOWN = "UNKNOWN"
+AUCTION_ENDING_ENDED = "ENDED"
 MANUAL_STATUS_TO_CHECK = "TO_CHECK"
 MANUAL_STATUS_VALIDATED = "VALIDATED"
 MANUAL_STATUS_IGNORE = "IGNORE"
@@ -537,9 +686,6 @@ COMMON_REPORT_KEYWORDS = [
     "BOX",
     "シュリンク付き",
     "未開封",
-    "PSA10",
-    "PSA9",
-    "ARS10",
     "SAR",
     "SR",
     "旧裏",
@@ -570,6 +716,27 @@ PRESERVED_SHEET_FIELDS = [
     "manual_price_confidence",
     "manual_status",
 ]
+GOOGLE_SHEET_MIGRATIONS = [
+    (GOOGLE_LEGACY_BEST_WORKSHEET_NAME, GOOGLE_BEST_WORKSHEET_NAME),
+    (GOOGLE_LEGACY_NEEDS_PRICE_WORKSHEET_NAME, GOOGLE_NEEDS_PRICE_WORKSHEET_NAME),
+    (GOOGLE_LEGACY_DEALS_WORKSHEET_NAME, GOOGLE_DEALS_WORKSHEET_NAME),
+]
+GRADED_KEYWORDS = ["PSA", "PSA10", "PSA9", "ARS", "ARS10", "CGC", "BGS", "鑑定品", "鑑定", "ケース付き", "スラブ"]
+GOOD_CONDITION_KEYWORDS = ["美品", "未使用", "目立った傷なし", "極美品"]
+DAMAGED_KEYWORDS = ["傷あり", "傷", "白かけ", "折れ", "凹み", "破損", "ジャンク"]
+OLD_BACK_KEYWORDS = ["旧裏", "旧裏面"]
+OLD_BACK_ALLOWED_LOT_KEYWORDS = ["まとめ売り", "大量", "引退品", "セット", "まとめ"]
+SEALED_BOX_KEYWORDS = ["BOX", "ボックス", "未開封BOX", "シュリンク付き", "未開封", "新品未開封", "ハイクラスパック", "絶版BOX", "スペシャルBOX"]
+AUCTION_ENDED_KEYWORDS = [
+    "終了",
+    "終了しました",
+    "オークション終了",
+    "このオークションは終了",
+    "ended",
+    "auction ended",
+    "closed",
+    "finished",
+]
 
 
 def setup_logging() -> None:
@@ -599,6 +766,43 @@ def load_blacklist_keywords() -> List[str]:
     return load_keywords_from_file(config.BLACKLIST_WORDS_FILE) or list(config.GLOBAL_BLACKLIST_KEYWORDS)
 
 
+def contains_any_keyword(text: str, keywords: Sequence[str]) -> bool:
+    return any(keyword and keyword in text for keyword in keywords)
+
+
+def is_sealed_box_or_display(title: str, matched_product_japanese: str = "") -> bool:
+    haystack = combine_context(title or "", matched_product_japanese or "")
+    return contains_any_keyword(haystack, SEALED_BOX_KEYWORDS)
+
+
+def is_old_back_lot(title: str) -> bool:
+    return contains_any_keyword(title, OLD_BACK_KEYWORDS) and contains_any_keyword(title, OLD_BACK_ALLOWED_LOT_KEYWORDS)
+
+
+def is_old_card_single(title: str) -> bool:
+    return contains_any_keyword(title, OLD_BACK_KEYWORDS) and not contains_any_keyword(title, OLD_BACK_ALLOWED_LOT_KEYWORDS)
+
+
+def detect_auction_is_ended(*texts: str) -> bool:
+    combined = normalize_numeric_text(combine_context(*texts))
+    if not combined:
+        return False
+    lowered = combined.casefold()
+    return (
+        "このオークションは終了" in combined
+        or "終了しました" in combined
+        or "オークション終了" in combined
+        or "残り時間 終了" in combined
+        or "残り 終了" in combined
+        or "time left ended" in lowered
+        or "auction ended" in lowered
+        or "ended" in lowered
+        or "closed" in lowered
+        or "finished" in lowered
+        or "terminé" in lowered
+    )
+
+
 def load_market_prices(csv_path: str = "market_prices.csv") -> List[MarketPriceEntry]:
     if not os.path.exists(csv_path):
         logging.warning("Market prices file not found: %s", csv_path)
@@ -610,6 +814,8 @@ def load_market_prices(csv_path: str = "market_prices.csv") -> List[MarketPriceE
         for row in reader:
             keyword = (row.get("keyword") or "").strip()
             if not keyword:
+                continue
+            if contains_any_keyword(keyword, GRADED_KEYWORDS):
                 continue
             entries.append(
                 MarketPriceEntry(
@@ -724,6 +930,16 @@ def compute_manual_action_needed(
     return ""
 
 
+def compute_opportunity_type(listing_type: str, buy_now_price_yen: Optional[int]) -> str:
+    if listing_type in (LISTING_TYPE_AUCTION, LISTING_TYPE_LOW_START_AUCTION):
+        return OPPORTUNITY_TYPE_AUCTION_PLUS_BUY_NOW if (buy_now_price_yen or 0) > 0 else OPPORTUNITY_TYPE_AUCTION_ONLY
+    if listing_type == LISTING_TYPE_BUY_NOW:
+        return OPPORTUNITY_TYPE_BUY_NOW
+    if listing_type == LISTING_TYPE_FIXED_PRICE:
+        return OPPORTUNITY_TYPE_FIXED_PRICE
+    return OPPORTUNITY_TYPE_UNKNOWN
+
+
 def get_sheet_header_label(header: str) -> str:
     return GOOGLE_HEADER_LABELS.get(header, header)
 
@@ -797,6 +1013,60 @@ ACTION_BACKGROUND_COLORS = {
 HEADER_BACKGROUND_COLOR = rgb(217, 217, 217)
 EDITABLE_BACKGROUND_COLOR = rgb(255, 249, 196)
 DEFAULT_BACKGROUND_COLOR = rgb(255, 255, 255)
+OPPORTUNITY_TYPE_BACKGROUND_COLORS = {
+    OPPORTUNITY_TYPE_AUCTION_PLUS_BUY_NOW: rgb(221, 235, 247),
+    OPPORTUNITY_TYPE_AUCTION_ONLY: DEFAULT_BACKGROUND_COLOR,
+    OPPORTUNITY_TYPE_BUY_NOW: rgb(198, 239, 206),
+    OPPORTUNITY_TYPE_FIXED_PRICE: rgb(198, 239, 206),
+    OPPORTUNITY_TYPE_UNKNOWN: rgb(224, 224, 224),
+}
+AUCTION_ENDED_BACKGROUND_COLORS = {
+    "True": rgb(224, 224, 224),
+    "False": DEFAULT_BACKGROUND_COLOR,
+}
+RISK_FLAGS_BACKGROUND_COLORS = {
+    "filled": rgb(252, 228, 214),
+    "empty": DEFAULT_BACKGROUND_COLOR,
+}
+AUCTION_ENDING_SOON_COLORS = {
+    AUCTION_ENDING_VERY_SOON: rgb(244, 204, 204),
+    AUCTION_ENDING_SOON: rgb(252, 228, 214),
+    AUCTION_ENDING_NO: DEFAULT_BACKGROUND_COLOR,
+    AUCTION_ENDING_UNKNOWN: rgb(242, 242, 242),
+    AUCTION_ENDING_ENDED: rgb(224, 224, 224),
+}
+LINK_COLUMNS = {
+    "link_for_zenmarket",
+    "url",
+    "cardmarket_search_url",
+    "ebay_sold_search_url",
+    "pricecharting_search_url",
+}
+FIXED_COLUMN_WIDTHS = {
+    "title": 420,
+    "notes": 250,
+    "link_for_zenmarket": 140,
+    "url": 140,
+    "cardmarket_search_url": 140,
+    "ebay_sold_search_url": 140,
+    "pricecharting_search_url": 140,
+    "price_yen": 105,
+    "current_price_yen": 105,
+    "buy_now_price_yen": 120,
+    "total_cost_eur": 115,
+    "market_price_eur": 110,
+    "profit_eur": 110,
+    "roi_percent": 95,
+    "time_left": 120,
+    "time_left_minutes": 105,
+    "auction_ending_soon": 95,
+    "opportunity_type": 140,
+    "price_source": 160,
+    "time_left_source": 160,
+    "risk_flags": 220,
+    "auction_is_ended": 110,
+    "bid_count": 110,
+}
 
 
 def build_base_sheet_format_requests(worksheet_id: int, header_count: int, row_count: int) -> List[Dict[str, object]]:
@@ -888,6 +1158,48 @@ def build_data_validation_request(
     }
 
 
+def build_column_width_request(worksheet_id: int, col_index: int, pixel_size: int) -> Dict[str, object]:
+    return {
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": worksheet_id,
+                "dimension": "COLUMNS",
+                "startIndex": col_index,
+                "endIndex": col_index + 1,
+            },
+            "properties": {"pixelSize": pixel_size},
+            "fields": "pixelSize",
+        }
+    }
+
+
+def build_text_style_request(
+    worksheet_id: int,
+    col_index: int,
+    row_count: int,
+    wrap_strategy: str,
+    horizontal_alignment: Optional[str] = None,
+) -> Dict[str, object]:
+    user_entered_format: Dict[str, object] = {"wrapStrategy": wrap_strategy}
+    fields = ["userEnteredFormat.wrapStrategy"]
+    if horizontal_alignment:
+        user_entered_format["horizontalAlignment"] = horizontal_alignment
+        fields.append("userEnteredFormat.horizontalAlignment")
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": worksheet_id,
+                "startRowIndex": 1,
+                "endRowIndex": max(2, row_count + 1),
+                "startColumnIndex": col_index,
+                "endColumnIndex": col_index + 1,
+            },
+            "cell": {"userEnteredFormat": user_entered_format},
+            "fields": ",".join(fields),
+        }
+    }
+
+
 def apply_google_sheet_formatting(
     spreadsheet: object,
     worksheet: object,
@@ -952,8 +1264,13 @@ def apply_google_sheet_formatting(
                     )
                 )
 
+    opportunity_col = headers.index("opportunity_type") if "opportunity_type" in headers else None
+
     status_col = headers.index("decision") if "decision" in headers else None
     action_col = headers.index("manual_action_needed") if "manual_action_needed" in headers else None
+    ending_col = headers.index("auction_ending_soon") if "auction_ending_soon" in headers else None
+    ended_col = headers.index("auction_is_ended") if "auction_is_ended" in headers else None
+    risk_col = headers.index("risk_flags") if "risk_flags" in headers else None
     for row_index, row in enumerate(rows, start=1):
         if status_col is not None:
             status_color = STATUS_BACKGROUND_COLORS.get(row.get("decision", ""))
@@ -991,6 +1308,84 @@ def apply_google_sheet_formatting(
                         }
                     }
                 )
+        if worksheet_name == GOOGLE_BEST_WORKSHEET_NAME and opportunity_col is not None:
+            opportunity_color = OPPORTUNITY_TYPE_BACKGROUND_COLORS.get(
+                row.get("opportunity_type", OPPORTUNITY_TYPE_UNKNOWN),
+                DEFAULT_BACKGROUND_COLOR,
+            )
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": worksheet_id,
+                            "startRowIndex": row_index,
+                            "endRowIndex": row_index + 1,
+                            "startColumnIndex": opportunity_col,
+                            "endColumnIndex": opportunity_col + 1,
+                        },
+                        "cell": {"userEnteredFormat": {"backgroundColor": opportunity_color}},
+                        "fields": "userEnteredFormat.backgroundColor",
+                    }
+                }
+            )
+        if ending_col is not None:
+            ending_color = AUCTION_ENDING_SOON_COLORS.get(
+                row.get("auction_ending_soon", AUCTION_ENDING_UNKNOWN),
+                DEFAULT_BACKGROUND_COLOR,
+            )
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": worksheet_id,
+                            "startRowIndex": row_index,
+                            "endRowIndex": row_index + 1,
+                            "startColumnIndex": ending_col,
+                            "endColumnIndex": ending_col + 1,
+                        },
+                        "cell": {"userEnteredFormat": {"backgroundColor": ending_color}},
+                        "fields": "userEnteredFormat.backgroundColor",
+                    }
+                    }
+                )
+        if ended_col is not None:
+            ended_value = str(row.get("auction_is_ended", "") or "")
+            ended_color = AUCTION_ENDED_BACKGROUND_COLORS.get(ended_value, DEFAULT_BACKGROUND_COLOR)
+            if ended_color != DEFAULT_BACKGROUND_COLOR:
+                requests.append(
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": worksheet_id,
+                                "startRowIndex": row_index,
+                                "endRowIndex": row_index + 1,
+                                "startColumnIndex": ended_col,
+                                "endColumnIndex": ended_col + 1,
+                            },
+                            "cell": {"userEnteredFormat": {"backgroundColor": ended_color}},
+                            "fields": "userEnteredFormat.backgroundColor",
+                        }
+                    }
+                )
+        if risk_col is not None:
+            risk_value = str(row.get("risk_flags", "") or "").strip()
+            risk_color = RISK_FLAGS_BACKGROUND_COLORS["filled"] if risk_value else RISK_FLAGS_BACKGROUND_COLORS["empty"]
+            if risk_color != DEFAULT_BACKGROUND_COLOR:
+                requests.append(
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": worksheet_id,
+                                "startRowIndex": row_index,
+                                "endRowIndex": row_index + 1,
+                                "startColumnIndex": risk_col,
+                                "endColumnIndex": risk_col + 1,
+                            },
+                            "cell": {"userEnteredFormat": {"backgroundColor": risk_color}},
+                            "fields": "userEnteredFormat.backgroundColor",
+                        }
+                    }
+                )
 
     requests.append(
         {
@@ -1004,6 +1399,52 @@ def apply_google_sheet_formatting(
             }
         }
     )
+
+    for col_index, field in enumerate(headers):
+        if field in FIXED_COLUMN_WIDTHS:
+            requests.append(
+                build_column_width_request(
+                    worksheet_id=worksheet_id,
+                    col_index=col_index,
+                    pixel_size=FIXED_COLUMN_WIDTHS[field],
+                )
+            )
+        if field in LINK_COLUMNS:
+            requests.append(
+                build_text_style_request(
+                    worksheet_id=worksheet_id,
+                    col_index=col_index,
+                    row_count=len(rows),
+                    wrap_strategy="CLIP",
+                )
+            )
+        elif field == "title":
+            requests.append(
+                build_text_style_request(
+                    worksheet_id=worksheet_id,
+                    col_index=col_index,
+                    row_count=len(rows),
+                    wrap_strategy="WRAP",
+                )
+            )
+        elif field == "notes":
+            requests.append(
+                build_text_style_request(
+                    worksheet_id=worksheet_id,
+                    col_index=col_index,
+                    row_count=len(rows),
+                    wrap_strategy="WRAP",
+                )
+            )
+        else:
+            requests.append(
+                build_text_style_request(
+                    worksheet_id=worksheet_id,
+                    col_index=col_index,
+                    row_count=len(rows),
+                    wrap_strategy="CLIP",
+                )
+            )
 
     spreadsheet.batch_update({"requests": requests})
 
@@ -1020,9 +1461,17 @@ def extract_listing_metadata(title: str, context_text: str, price_yen: int) -> D
     current_price = _extract_int(CURRENT_PRICE_RE) or (str(price_yen) if price_yen > 0 else "")
     buy_now_price = _extract_int(BUY_NOW_PRICE_RE)
     bid_count = _extract_int(BID_COUNT_RE)
-    time_left_match = TIME_LEFT_RE.search(haystack)
     seller_match = SELLER_RE.search(haystack)
     seller_rating_match = SELLER_RATING_RE.search(haystack)
+    time_left, time_left_minutes, raw_time_left_text = extract_time_left_data(haystack)
+    auction_end_at = extract_auction_end_at(haystack)
+    auction_is_ended = detect_auction_is_ended(haystack, time_left)
+    if auction_is_ended:
+        time_left = "Terminé"
+        time_left_minutes = 0
+        auction_ending_soon = AUCTION_ENDING_ENDED
+    else:
+        auction_ending_soon = get_auction_ending_soon_value(time_left_minutes)
 
     shipping_japan = ""
     if "送料無料" in haystack:
@@ -1032,7 +1481,13 @@ def extract_listing_metadata(title: str, context_text: str, price_yen: int) -> D
         "current_price_yen": current_price,
         "buy_now_price_yen": buy_now_price,
         "bid_count": bid_count,
-        "time_left": time_left_match.group(1).strip() if time_left_match else "",
+        "time_left": time_left,
+        "time_left_minutes": str(time_left_minutes) if time_left_minutes is not None else "",
+        "auction_end_at": auction_end_at,
+        "auction_ending_soon": auction_ending_soon,
+        "time_left_source": "yahoo_search",
+        "raw_time_left_text": raw_time_left_text,
+        "auction_is_ended": "True" if auction_is_ended else "False",
         "seller_name": seller_match.group(1).strip() if seller_match else "",
         "seller_rating": seller_rating_match.group(1).strip() if seller_rating_match else "",
         "shipping_japan": shipping_japan,
@@ -1046,12 +1501,16 @@ def build_risk_flags(
     decision: str,
     manual_market_price_eur: float,
     seller_rating: str,
+    auction_is_ended: bool = False,
 ) -> List[str]:
     flags: List[str] = []
+    title_text = title or ""
     haystack = combine_context(title or "", context_text or "")
 
     if listing_type == LISTING_TYPE_LOW_START_AUCTION:
         flags.append("LOW_START_AUCTION")
+    if auction_is_ended:
+        flags.append("AUCTION_ENDED")
     if any(keyword in haystack for keyword in ("シュリンクなし", "シュリンク無し")):
         flags.append("NO_SHRINK")
     if "開封済み" in haystack:
@@ -1060,10 +1519,18 @@ def build_risk_flags(
         flags.append("EMPTY_BOX")
     if "サーチ済み" in haystack:
         flags.append("SEARCHED_PACK")
-    if "オリパ" in haystack:
+    if any(keyword in haystack for keyword in ("オリパ", "mystery pack", "mystery")):
         flags.append("MYSTERY_PACK")
-    if any(keyword in haystack for keyword in ("傷あり", "破損", "ジャンク")):
+    if contains_any_keyword(title_text, DAMAGED_KEYWORDS):
         flags.append("DAMAGED")
+    if contains_any_keyword(title_text, GRADED_KEYWORDS):
+        flags.append("GRADED")
+    if contains_any_keyword(title_text, GOOD_CONDITION_KEYWORDS):
+        flags.append("GOOD_CONDITION_LOOSE")
+    if is_old_card_single(title_text):
+        flags.append("OLD_CARD_SINGLE")
+    elif is_old_back_lot(title_text):
+        flags.append("OLD_BACK_LOT")
     if any(keyword in haystack for keyword in ("まとめ売り", "引退品", "大量")):
         flags.append("GENERIC_LOT")
     if decision == DECISION_NEEDS_PRICE and manual_market_price_eur <= 0:
@@ -1091,19 +1558,29 @@ def compute_deal_quality_score(
     decision: str,
 ) -> int:
     score = 0
+    if is_sealed_box_or_display(title, matched_product_japanese):
+        score += 40
     if listing_type in (LISTING_TYPE_BUY_NOW, LISTING_TYPE_FIXED_PRICE):
         score += 30
-    if matched_product_japanese:
+    if "シュリンク付き" in title:
         score += 20
+    if "未開封" in title:
+        score += 20
+    if "GOOD_CONDITION_LOOSE" in risk_flags:
+        score += 15
+    if "OLD_BACK_LOT" in risk_flags:
+        score += 10
     if manual_market_price_eur > 0:
         score += 20
-    if "シュリンク付き" in title:
-        score += 10
-    if "未開封" in title:
-        score += 10
+    if "GRADED" in risk_flags:
+        score -= 50
+    if "OLD_CARD_SINGLE" in risk_flags:
+        score -= 50
     if "LOW_START_AUCTION" in risk_flags:
         score -= 30
-    if any(flag in risk_flags for flag in ("NO_SHRINK", "EMPTY_BOX", "SEARCHED_PACK", "MYSTERY_PACK", "DAMAGED")):
+    if any(flag in risk_flags for flag in ("EMPTY_BOX", "SEARCHED_PACK", "MYSTERY_PACK", "DAMAGED")):
+        score -= 50
+    if "NO_SHRINK" in risk_flags and is_sealed_box_or_display(title, matched_product_japanese):
         score -= 50
     if decision == DECISION_NEEDS_PRICE:
         score -= 20
@@ -1156,6 +1633,7 @@ def load_rules() -> List[SearchRule]:
     buy_now_queries = load_keywords_from_file(config.KEYWORDS_BUY_NOW_FILE) or list(config.KEYWORDS_BUY_NOW_DEFAULT)
     auction_queries = load_keywords_from_file(config.KEYWORDS_AUCTION_FILE) or list(config.KEYWORDS_AUCTION_DEFAULT)
     lots_queries = load_keywords_from_file(config.KEYWORDS_LOTS_FILE) or list(config.KEYWORDS_LOTS_DEFAULT)
+    loose_queries = load_keywords_from_file(config.KEYWORDS_LOOSE_CARDS_FILE) or list(config.KEYWORDS_LOOSE_CARDS_DEFAULT)
 
     for query in buy_now_queries:
         _append_rule_if_new(
@@ -1187,11 +1665,161 @@ def load_rules() -> List[SearchRule]:
             max_price_yen=int(config.LOTS_RULE_DEFAULTS["max_price_yen"]),
         )
 
+    for query in loose_queries:
+        _append_rule_if_new(
+            rules=rules,
+            known_queries=known_queries,
+            name_prefix="LOOSE keyword",
+            query=query,
+            market_price_eur=float(config.LOOSE_RULE_DEFAULTS["market_price_eur"]),
+            max_price_yen=int(config.LOOSE_RULE_DEFAULTS["max_price_yen"]),
+        )
+
     return rules
 
 
 def normalize_text(value: str) -> str:
     return " ".join(value.strip().split())
+
+
+def normalize_numeric_text(value: str) -> str:
+    return normalize_text(value).translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+
+
+def parse_time_left_to_minutes(text: str) -> Optional[int]:
+    cleaned = normalize_numeric_text(text)
+    if not cleaned:
+        return None
+
+    lowered = cleaned.casefold()
+    matched = False
+    days = 0
+    hours = 0
+    minutes = 0
+
+    for pattern, unit in (
+        (r"(\d+)\s*日", "days"),
+        (r"(\d+)\s*時間", "hours"),
+        (r"(\d+)\s*分", "minutes"),
+        (r"(\d+)\s*day[s]?\b", "days"),
+        (r"(\d+)\s*jour[s]?\b", "days"),
+        (r"(\d+)\s*hour[s]?\b", "hours"),
+        (r"(\d+)\s*heure[s]?\b", "hours"),
+        (r"(\d+)\s*minute[s]?\b", "minutes"),
+        (r"(\d+)\s*d\b", "days"),
+        (r"(\d+)\s*h\b", "hours"),
+        (r"(\d+)\s*m\b", "minutes"),
+    ):
+        match = re.search(pattern, lowered, re.IGNORECASE)
+        if not match:
+            continue
+        matched = True
+        value = int(match.group(1))
+        if unit == "days":
+            days = value
+        elif unit == "hours":
+            hours = value
+        else:
+            minutes = value
+
+    if matched:
+        return (days * 1440) + (hours * 60) + minutes
+    if "終了間近" in cleaned or "ending soon" in lowered:
+        return 15
+    if "bientôt terminé" in lowered:
+        return 15
+    if detect_auction_is_ended(cleaned):
+        return 0
+    return None
+
+
+def extract_time_left_data(haystack: str) -> Tuple[str, Optional[int], str]:
+    cleaned = normalize_numeric_text(haystack)
+    if not cleaned:
+        return "", None, ""
+
+    for match in TIME_LEFT_CONTEXT_RE.finditer(cleaned):
+        snippet = normalize_text(match.group(0))
+        minutes = parse_time_left_to_minutes(snippet)
+        if minutes is not None:
+            return format_minutes_as_french_time(minutes, snippet), minutes, snippet
+
+    for pattern in (JP_DURATION_RE, EN_DURATION_RE):
+        match = pattern.search(cleaned)
+        if match:
+            raw = normalize_text(match.group(1))
+            minutes = parse_time_left_to_minutes(raw)
+            if minutes is not None:
+                return format_minutes_as_french_time(minutes, raw), minutes, raw
+
+    return "", None, ""
+
+
+def format_minutes_as_french_time(minutes: Optional[int], raw_text: str = "") -> str:
+    if minutes is None:
+        return normalize_text(raw_text)
+    if minutes <= 0:
+        return "Terminé"
+
+    lowered = normalize_numeric_text(raw_text).casefold()
+    if ("ending soon" in lowered or "終了間近" in raw_text) and not (
+        re.search(r"\d+\s*(?:日|時間|分|day|hour|minute|d\b|h\b|m\b)", lowered, re.IGNORECASE)
+    ):
+        return "Bientôt terminé"
+
+    days, remainder = divmod(minutes, 1440)
+    hours, mins = divmod(remainder, 60)
+    parts: List[str] = []
+    if days:
+        parts.append(f"{days} jour" + ("s" if days > 1 else ""))
+    if hours:
+        parts.append(f"{hours} heure" + ("s" if hours > 1 else ""))
+    if mins or not parts:
+        parts.append(f"{mins} minute" + ("s" if mins > 1 else ""))
+    return " ".join(parts)
+
+
+def extract_time_left_text(haystack: str) -> str:
+    time_left, _minutes, _raw = extract_time_left_data(haystack)
+    return time_left
+
+
+def extract_auction_end_at(haystack: str) -> str:
+    cleaned = normalize_numeric_text(haystack)
+    if not cleaned:
+        return ""
+
+    now = dt.datetime.now()
+    for pattern in (END_TIME_RE, END_TIME_FALLBACK_RE):
+        match = pattern.search(cleaned)
+        if not match:
+            continue
+        year = int(match.group("year") or now.year)
+        month = int(match.group("month"))
+        day = int(match.group("day"))
+        hour = int(match.group("hour"))
+        minute = int(match.group("minute") or 0)
+        try:
+            return dt.datetime(year, month, day, hour, minute).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return ""
+    return ""
+
+
+def get_auction_ending_soon_value(time_left_minutes: Optional[int]) -> str:
+    if time_left_minutes is None:
+        return AUCTION_ENDING_UNKNOWN
+    if time_left_minutes <= 0:
+        return AUCTION_ENDING_NO
+    if time_left_minutes <= config.ENDING_VERY_SOON_MINUTES:
+        return AUCTION_ENDING_VERY_SOON
+    if time_left_minutes <= config.ENDING_SOON_MINUTES:
+        return AUCTION_ENDING_SOON
+    return AUCTION_ENDING_NO
+
+
+def is_true_text(value: object) -> bool:
+    return str(value or "").strip().lower() in {"true", "1", "yes", "oui"}
 
 
 def parse_yen_amount(text: str) -> Optional[int]:
@@ -1318,32 +1946,59 @@ def build_yahoo_reader_url(query: str) -> str:
     return f"{config.JINA_READER_PREFIX}{raw_url}"
 
 
-def fetch_markdown(session: requests.Session, query: str) -> str:
-    url = build_yahoo_reader_url(query)
+def build_reader_url_from_target_url(target_url: str) -> str:
+    cleaned = (target_url or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = cleaned.replace("https://", "").replace("http://", "")
+    return f"{config.JINA_READER_PREFIX}{cleaned}"
+
+
+def fetch_reader_content_verbose(
+    session: requests.Session,
+    reader_url: str,
+    label: str,
+    timeout_seconds: Optional[int] = None,
+    retries: Optional[int] = None,
+    retry_sleep_seconds: float = 1.2,
+    backoff_multiplier: float = 1.0,
+) -> Tuple[str, str]:
+    if not reader_url:
+        return "", "empty_reader_url"
+
     headers = {
         "User-Agent": config.USER_AGENT,
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
     }
 
-    last_error: Optional[Exception] = None
-    for attempt in range(1, config.REQUEST_RETRIES + 2):
+    last_error = ""
+    attempts_total = (config.REQUEST_RETRIES + 1) if retries is None else max(1, retries + 1)
+    timeout_value = timeout_seconds or config.REQUEST_TIMEOUT_SECONDS
+    for attempt in range(1, attempts_total + 1):
         try:
-            response = session.get(url, headers=headers, timeout=config.REQUEST_TIMEOUT_SECONDS)
+            response = session.get(reader_url, headers=headers, timeout=timeout_value)
             response.raise_for_status()
-            return response.text
+            return response.text, ""
         except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            logging.warning(
-                "Fetch failed for query '%s' (attempt %s): %s",
-                query,
-                attempt,
-                exc,
-            )
-            time.sleep(1.2)
+            last_error = str(exc)
+            logging.warning("Fetch failed for %s (attempt %s): %s", label, attempt, exc)
+            if attempt < attempts_total:
+                time.sleep(retry_sleep_seconds * max(1.0, backoff_multiplier ** (attempt - 1)))
 
-    if last_error:
-        raise last_error
-    raise RuntimeError("Unknown fetch error")
+    return "", last_error or "unknown_fetch_error"
+
+
+def fetch_reader_content(session: requests.Session, reader_url: str, label: str) -> str:
+    content, _ = fetch_reader_content_verbose(session, reader_url, label)
+    return content
+
+
+def fetch_markdown(session: requests.Session, query: str) -> str:
+    url = build_yahoo_reader_url(query)
+    content = fetch_reader_content(session, url, f"query '{query}'")
+    if content:
+        return content
+    raise RuntimeError(f"Could not fetch query '{query}'")
 
 
 def parse_listings_from_markdown(markdown: str, max_items: int) -> List[ParsedListing]:
@@ -1468,9 +2123,20 @@ def compute_deal(
     if listing.price_yen is None:
         raise ValueError("Cannot score a listing without price")
 
-    payment_fee_yen = int(round(listing.price_yen * config.ZENMARKET_PAYMENT_FEE_RATE))
+    listing_type, listing_type_reason = detect_listing_type(listing.title, listing.context_text, listing.url)
+    listing_metadata = extract_listing_metadata(listing.title, listing.context_text, listing.price_yen)
+    current_price_yen = int(to_float(listing_metadata.get("current_price_yen", 0))) or None
+    buy_now_price_yen = int(to_float(listing_metadata.get("buy_now_price_yen", 0))) or None
+    effective_price_yen = select_primary_purchase_price(
+        listing_type=listing_type,
+        base_price_yen=listing.price_yen,
+        current_price_yen=current_price_yen,
+        buy_now_price_yen=buy_now_price_yen,
+    )
+
+    payment_fee_yen = int(round(effective_price_yen * config.ZENMARKET_PAYMENT_FEE_RATE))
     total_cost_yen = (
-        listing.price_yen
+        effective_price_yen
         + config.ZENMARKET_SERVICE_FEE_YEN
         + payment_fee_yen
         + config.ESTIMATED_DOMESTIC_SHIPPING_YEN
@@ -1480,7 +2146,6 @@ def compute_deal(
     total_cost_eur = total_cost_yen / config.EUR_TO_JPY
     vat_eur = total_cost_eur * config.VAT_RATE
     landed_cost_eur = total_cost_eur + vat_eur
-    listing_type, listing_type_reason = detect_listing_type(listing.title, listing.context_text, listing.url)
     market_match = match_market_price(listing.title, market_prices)
     alias_match = match_product_alias(listing.title, PRODUCT_ALIASES)
 
@@ -1525,7 +2190,7 @@ def compute_deal(
         url=listing.url,
         query=rule.query,
         rule_name=rule.name,
-        price_yen=listing.price_yen,
+        price_yen=effective_price_yen,
         market_price_eur=round(market_price_eur, 2),
         max_buy_price_yen=max_buy_price_yen,
         total_cost_yen=total_cost_yen,
@@ -1541,6 +2206,20 @@ def compute_deal(
         matched_market_keyword=matched_market_keyword,
         market_price_source=market_price_source,
         market_price_confidence=market_price_confidence,
+        price_source="yahoo_search",
+        current_price_yen=current_price_yen,
+        buy_now_price_yen=buy_now_price_yen,
+        bid_count=int(to_float(listing_metadata.get("bid_count", 0))) or None,
+        time_left=listing_metadata.get("time_left", ""),
+        time_left_minutes=int(to_float(listing_metadata.get("time_left_minutes", 0))) or None,
+        auction_end_at=listing_metadata.get("auction_end_at", ""),
+        auction_ending_soon=listing_metadata.get("auction_ending_soon", AUCTION_ENDING_UNKNOWN),
+        time_left_source=listing_metadata.get("time_left_source", "yahoo_search"),
+        raw_time_left_text=listing_metadata.get("raw_time_left_text", ""),
+        auction_is_ended=is_true_text(listing_metadata.get("auction_is_ended", "False")),
+        seller_name=listing_metadata.get("seller_name", ""),
+        seller_rating=listing_metadata.get("seller_rating", ""),
+        shipping_japan=listing_metadata.get("shipping_japan", ""),
         detected_at=dt.datetime.now().isoformat(timespec="seconds"),
     )
 
@@ -1556,6 +2235,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             query TEXT NOT NULL,
             rule_name TEXT NOT NULL,
             price_yen INTEGER NOT NULL,
+            price_source TEXT NOT NULL DEFAULT 'unknown',
             market_price_eur REAL NOT NULL,
             max_buy_price_yen INTEGER NOT NULL DEFAULT 0,
             total_cost_yen INTEGER NOT NULL,
@@ -1576,11 +2256,25 @@ def init_db(conn: sqlite3.Connection) -> None:
             auto_price_sample_size INTEGER NOT NULL DEFAULT 0,
             auto_price_raw_summary TEXT NOT NULL DEFAULT '',
             auto_price_last_checked TEXT NOT NULL DEFAULT '',
+            current_price_yen INTEGER,
+            buy_now_price_yen INTEGER,
+            bid_count INTEGER,
+            time_left TEXT NOT NULL DEFAULT '',
+            time_left_minutes INTEGER,
+            auction_end_at TEXT NOT NULL DEFAULT '',
+            auction_ending_soon TEXT NOT NULL DEFAULT 'UNKNOWN',
+            time_left_source TEXT NOT NULL DEFAULT 'unknown',
+            raw_time_left_text TEXT NOT NULL DEFAULT '',
+            auction_is_ended TEXT NOT NULL DEFAULT 'False',
+            seller_name TEXT NOT NULL DEFAULT '',
+            seller_rating TEXT NOT NULL DEFAULT '',
+            shipping_japan TEXT NOT NULL DEFAULT '',
             detected_at TEXT NOT NULL
         )
         """
     )
     _ensure_db_column(conn, "deals", "listing_type", "TEXT NOT NULL DEFAULT 'UNKNOWN'")
+    _ensure_db_column(conn, "deals", "price_source", "TEXT NOT NULL DEFAULT 'unknown'")
     _ensure_db_column(conn, "deals", "max_buy_price_yen", "INTEGER NOT NULL DEFAULT 0")
     _ensure_db_column(conn, "deals", "listing_type_reason", "TEXT NOT NULL DEFAULT ''")
     _ensure_db_column(conn, "deals", "matched_market_keyword", "TEXT NOT NULL DEFAULT ''")
@@ -1591,6 +2285,19 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_db_column(conn, "deals", "auto_price_sample_size", "INTEGER NOT NULL DEFAULT 0")
     _ensure_db_column(conn, "deals", "auto_price_raw_summary", "TEXT NOT NULL DEFAULT ''")
     _ensure_db_column(conn, "deals", "auto_price_last_checked", "TEXT NOT NULL DEFAULT ''")
+    _ensure_db_column(conn, "deals", "current_price_yen", "INTEGER")
+    _ensure_db_column(conn, "deals", "buy_now_price_yen", "INTEGER")
+    _ensure_db_column(conn, "deals", "bid_count", "INTEGER")
+    _ensure_db_column(conn, "deals", "time_left", "TEXT NOT NULL DEFAULT ''")
+    _ensure_db_column(conn, "deals", "time_left_minutes", "INTEGER")
+    _ensure_db_column(conn, "deals", "auction_end_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_db_column(conn, "deals", "auction_ending_soon", "TEXT NOT NULL DEFAULT 'UNKNOWN'")
+    _ensure_db_column(conn, "deals", "time_left_source", "TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_db_column(conn, "deals", "raw_time_left_text", "TEXT NOT NULL DEFAULT ''")
+    _ensure_db_column(conn, "deals", "auction_is_ended", "TEXT NOT NULL DEFAULT 'False'")
+    _ensure_db_column(conn, "deals", "seller_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_db_column(conn, "deals", "seller_rating", "TEXT NOT NULL DEFAULT ''")
+    _ensure_db_column(conn, "deals", "shipping_japan", "TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS market_price_cache (
@@ -1606,6 +2313,35 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS detail_enrichment_cache (
+            url TEXT PRIMARY KEY,
+            last_checked_at TEXT NOT NULL,
+            zenmarket_last_checked_at TEXT NOT NULL DEFAULT '',
+            zenmarket_success TEXT NOT NULL DEFAULT 'False',
+            zenmarket_error TEXT NOT NULL DEFAULT '',
+            time_left TEXT NOT NULL DEFAULT '',
+            time_left_minutes INTEGER,
+            auction_end_at TEXT NOT NULL DEFAULT '',
+            auction_is_ended TEXT NOT NULL DEFAULT 'False',
+            time_left_source TEXT NOT NULL DEFAULT 'unknown',
+            raw_time_left_text TEXT NOT NULL DEFAULT '',
+            current_price_yen INTEGER,
+            buy_now_price_yen INTEGER,
+            bid_count INTEGER,
+            price_source TEXT NOT NULL DEFAULT 'unknown',
+            success TEXT NOT NULL DEFAULT 'False',
+            error TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    _ensure_db_column(conn, "detail_enrichment_cache", "zenmarket_last_checked_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_db_column(conn, "detail_enrichment_cache", "zenmarket_success", "TEXT NOT NULL DEFAULT 'False'")
+    _ensure_db_column(conn, "detail_enrichment_cache", "zenmarket_error", "TEXT NOT NULL DEFAULT ''")
+    _ensure_db_column(conn, "detail_enrichment_cache", "time_left_source", "TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_db_column(conn, "detail_enrichment_cache", "raw_time_left_text", "TEXT NOT NULL DEFAULT ''")
+    _ensure_db_column(conn, "detail_enrichment_cache", "price_source", "TEXT NOT NULL DEFAULT 'unknown'")
     conn.commit()
 
 
@@ -1622,13 +2358,16 @@ def save_if_new(conn: sqlite3.Connection, deal: ScoredDeal) -> bool:
             """
             INSERT INTO deals (
                 listing_id, title, url, query, rule_name, price_yen,
+                price_source,
                 market_price_eur, max_buy_price_yen, total_cost_yen, total_cost_eur, vat_eur,
                 landed_cost_eur, safe_resale_eur, profit_eur, roi_percent,
                 score, listing_type, listing_type_reason, matched_market_keyword,
                 market_price_source, market_price_confidence, auto_price_used,
                 auto_price_source, auto_price_sample_size, auto_price_raw_summary,
-                auto_price_last_checked, detected_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                auto_price_last_checked, current_price_yen, buy_now_price_yen,
+                bid_count, time_left, time_left_minutes, auction_end_at, time_left_source, raw_time_left_text,
+                auction_ending_soon, auction_is_ended, seller_name, seller_rating, shipping_japan, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 deal.listing_id,
@@ -1637,6 +2376,7 @@ def save_if_new(conn: sqlite3.Connection, deal: ScoredDeal) -> bool:
                 deal.query,
                 deal.rule_name,
                 deal.price_yen,
+                deal.price_source,
                 deal.market_price_eur,
                 deal.max_buy_price_yen,
                 deal.total_cost_yen,
@@ -1657,6 +2397,19 @@ def save_if_new(conn: sqlite3.Connection, deal: ScoredDeal) -> bool:
                 0,
                 "",
                 "",
+                deal.current_price_yen,
+                deal.buy_now_price_yen,
+                deal.bid_count,
+                deal.time_left,
+                deal.time_left_minutes,
+                deal.auction_end_at,
+                deal.time_left_source,
+                deal.raw_time_left_text,
+                deal.auction_ending_soon,
+                "True" if deal.auction_is_ended else "False",
+                deal.seller_name,
+                deal.seller_rating,
+                deal.shipping_japan,
                 deal.detected_at,
             ),
         )
@@ -1664,6 +2417,97 @@ def save_if_new(conn: sqlite3.Connection, deal: ScoredDeal) -> bool:
         return True
     except sqlite3.IntegrityError:
         return False
+
+
+def refresh_existing_deal(conn: sqlite3.Connection, deal: ScoredDeal) -> None:
+    conn.execute(
+        """
+        UPDATE deals
+        SET title = ?,
+            url = ?,
+            query = ?,
+            rule_name = ?,
+            price_yen = ?,
+            price_source = ?,
+            market_price_eur = ?,
+            max_buy_price_yen = ?,
+            total_cost_yen = ?,
+            total_cost_eur = ?,
+            vat_eur = ?,
+            landed_cost_eur = ?,
+            safe_resale_eur = ?,
+            profit_eur = ?,
+            roi_percent = ?,
+            score = ?,
+            listing_type = ?,
+            listing_type_reason = ?,
+            matched_market_keyword = ?,
+            market_price_source = ?,
+            market_price_confidence = ?,
+            auto_price_used = ?,
+            auto_price_source = ?,
+            auto_price_sample_size = ?,
+            auto_price_raw_summary = ?,
+            auto_price_last_checked = ?,
+            current_price_yen = ?,
+            buy_now_price_yen = ?,
+            bid_count = ?,
+            time_left = ?,
+            time_left_minutes = ?,
+            auction_end_at = ?,
+            time_left_source = ?,
+            raw_time_left_text = ?,
+            auction_ending_soon = ?,
+            auction_is_ended = ?,
+            seller_name = ?,
+            seller_rating = ?,
+            shipping_japan = ?
+        WHERE listing_id = ?
+        """,
+        (
+            deal.title,
+            deal.url,
+            deal.query,
+            deal.rule_name,
+            deal.price_yen,
+            deal.price_source,
+            deal.market_price_eur,
+            deal.max_buy_price_yen,
+            deal.total_cost_yen,
+            deal.total_cost_eur,
+            deal.vat_eur,
+            deal.landed_cost_eur,
+            deal.safe_resale_eur,
+            deal.profit_eur,
+            deal.roi_percent,
+            deal.score,
+            deal.listing_type,
+            deal.listing_type_reason,
+            deal.matched_market_keyword,
+            deal.market_price_source,
+            deal.market_price_confidence,
+            "False",
+            "",
+            0,
+            "",
+            "",
+            deal.current_price_yen,
+            deal.buy_now_price_yen,
+            deal.bid_count,
+            deal.time_left,
+            deal.time_left_minutes,
+            deal.auction_end_at,
+            deal.time_left_source,
+            deal.raw_time_left_text,
+            deal.auction_ending_soon,
+            "True" if deal.auction_is_ended else "False",
+            deal.seller_name,
+            deal.seller_rating,
+            deal.shipping_japan,
+            deal.listing_id,
+        ),
+    )
+    conn.commit()
 
 
 def fetch_all_deals(conn: sqlite3.Connection) -> List[Dict[str, object]]:
@@ -1688,10 +2532,17 @@ def export_csv(
         "rule_name",
         "data_source",
         "price_yen",
+        "price_source",
         "current_price_yen",
         "buy_now_price_yen",
         "bid_count",
         "time_left",
+        "time_left_minutes",
+        "auction_end_at",
+        "auction_ending_soon",
+        "time_left_source",
+        "raw_time_left_text",
+        "auction_is_ended",
         "seller_name",
         "seller_rating",
         "shipping_japan",
@@ -1755,10 +2606,17 @@ def export_csv(
                     deal.get("rule_name", ""),
                     row.get("data_source", ""),
                     row.get("price_yen", ""),
+                    row.get("price_source", ""),
                     row.get("current_price_yen", ""),
                     row.get("buy_now_price_yen", ""),
                     row.get("bid_count", ""),
                     row.get("time_left", ""),
+                    row.get("time_left_minutes", ""),
+                    row.get("auction_end_at", ""),
+                    row.get("auction_ending_soon", ""),
+                    row.get("time_left_source", ""),
+                    row.get("raw_time_left_text", ""),
+                    row.get("auction_is_ended", ""),
                     row.get("seller_name", ""),
                     row.get("seller_rating", ""),
                     row.get("shipping_japan", ""),
@@ -2053,6 +2911,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Test automatic market price resolution on 5 NEEDS_PRICE listings without writing to Google Sheets.",
     )
+    parser.add_argument(
+        "--force-detail-refresh",
+        action="store_true",
+        help="Ignore the detail enrichment cache and re-check final useful Yahoo listing pages.",
+    )
+    parser.add_argument(
+        "--zenmarket-full-refresh",
+        action="store_true",
+        help="Retry ZenMarket aggressively on all Opportunités lines that are not yet backed by ZenMarket detail.",
+    )
     return parser.parse_args()
 
 
@@ -2070,7 +2938,11 @@ def get_decision(
     price_yen: int,
     manual_status: str = "",
     manual_price_used: bool = False,
+    auction_is_ended: bool = False,
 ) -> str:
+    if auction_is_ended:
+        return DECISION_SKIP
+
     if manual_status == MANUAL_STATUS_IGNORE:
         return DECISION_IGNORE
 
@@ -2152,6 +3024,23 @@ def listing_type_rank(listing_type: str) -> int:
     if listing_type == LISTING_TYPE_UNKNOWN:
         return 4
     return 5
+
+
+def needs_price_priority(row: Dict[str, str]) -> int:
+    title = row.get("title", "")
+    risk_flags = row.get("risk_flags", "")
+    matched_product = row.get("matched_product_japanese", "")
+    if is_sealed_box_or_display(title, matched_product):
+        return 0
+    if "GOOD_CONDITION_LOOSE" in risk_flags:
+        return 1
+    if "OLD_BACK_LOT" in risk_flags:
+        return 2
+    return 3
+
+
+def is_row_auction_ended(row: Dict[str, str]) -> bool:
+    return is_true_text(row.get("auction_is_ended", "False"))
 
 
 def build_sheet_row(
@@ -2243,8 +3132,68 @@ def build_sheet_row(
     if not pricecharting_query:
         pricecharting_query = fallback_query
 
-    price_yen = int(to_float(deal.get("price_yen", 0)))
-    listing_metadata = extract_listing_metadata(title, context_text, price_yen)
+    base_price_yen = int(to_float(deal.get("price_yen", 0)))
+    listing_metadata = extract_listing_metadata(title, context_text, base_price_yen)
+    persisted_metadata = {
+        "current_price_yen": str(int(to_float(deal.get("current_price_yen", 0))) or "") if deal.get("current_price_yen") not in (None, "") else "",
+        "buy_now_price_yen": str(int(to_float(deal.get("buy_now_price_yen", 0))) or "") if deal.get("buy_now_price_yen") not in (None, "") else "",
+        "bid_count": str(int(to_float(deal.get("bid_count", 0))) or "") if deal.get("bid_count") not in (None, "") else "",
+        "time_left": str(deal.get("time_left", "") or "").strip(),
+        "time_left_minutes": str(int(to_float(deal.get("time_left_minutes", 0))) or "") if deal.get("time_left_minutes") not in (None, "") else "",
+        "auction_end_at": str(deal.get("auction_end_at", "") or "").strip(),
+        "auction_ending_soon": str(deal.get("auction_ending_soon", "") or "").strip(),
+        "time_left_source": str(deal.get("time_left_source", "") or "").strip(),
+        "raw_time_left_text": str(deal.get("raw_time_left_text", "") or "").strip(),
+        "auction_is_ended": str(deal.get("auction_is_ended", "") or "").strip(),
+        "seller_name": str(deal.get("seller_name", "") or "").strip(),
+        "seller_rating": str(deal.get("seller_rating", "") or "").strip(),
+        "shipping_japan": str(deal.get("shipping_japan", "") or "").strip(),
+    }
+    for key, value in persisted_metadata.items():
+        if value:
+            listing_metadata[key] = value
+    auction_is_ended = is_true_text(listing_metadata.get("auction_is_ended", "False")) or detect_auction_is_ended(
+        listing_metadata.get("time_left", ""),
+        context_text,
+        title,
+    )
+    if listing_metadata.get("time_left") and not listing_metadata.get("time_left_minutes"):
+        parsed_minutes = parse_time_left_to_minutes(listing_metadata.get("time_left", ""))
+        if parsed_minutes is not None:
+            listing_metadata["time_left_minutes"] = str(parsed_minutes)
+    if auction_is_ended:
+        listing_metadata["auction_is_ended"] = "True"
+        listing_metadata["time_left"] = "Terminé"
+        listing_metadata["time_left_minutes"] = "0"
+        listing_metadata["auction_ending_soon"] = AUCTION_ENDING_ENDED
+    elif listing_metadata.get("auction_ending_soon") in ("", AUCTION_ENDING_UNKNOWN):
+        listing_metadata["auction_ending_soon"] = get_auction_ending_soon_value(
+            int(to_float(listing_metadata.get("time_left_minutes", 0))) if listing_metadata.get("time_left_minutes") else None
+        )
+    else:
+        listing_metadata["auction_is_ended"] = "False"
+    if is_suspicious_time_left(
+        listing_metadata.get("time_left", ""),
+        listing_metadata.get("time_left_minutes", ""),
+        listing_metadata.get("time_left_source", ""),
+        listing_metadata.get("raw_time_left_text", ""),
+    ):
+        listing_metadata = clear_time_left_fields(listing_metadata, source="unknown")
+
+    current_price_yen = parse_optional_int(listing_metadata.get("current_price_yen", ""))
+    buy_now_price_yen = parse_optional_int(listing_metadata.get("buy_now_price_yen", ""))
+    if listing_type in (LISTING_TYPE_BUY_NOW, LISTING_TYPE_FIXED_PRICE) and buy_now_price_yen and not current_price_yen:
+        current_price_yen = buy_now_price_yen
+        listing_metadata["current_price_yen"] = str(buy_now_price_yen)
+
+    price_yen = select_primary_purchase_price(
+        listing_type=listing_type,
+        base_price_yen=base_price_yen,
+        current_price_yen=current_price_yen,
+        buy_now_price_yen=buy_now_price_yen,
+    )
+    opportunity_type = compute_opportunity_type(listing_type, buy_now_price_yen)
+    price_source = choose_price_source(deal, listing_metadata, fallback="yahoo_search")
     total_cost_yen = (
         price_yen
         + config.ZENMARKET_SERVICE_FEE_YEN
@@ -2285,12 +3234,15 @@ def build_sheet_row(
         price_yen=price_yen,
         manual_status=manual_status,
         manual_price_used=manual_price_used,
+        auction_is_ended=auction_is_ended,
     )
     score_reliability = get_score_reliability(listing_type, market_price_confidence, decision)
     manual_action_needed = compute_manual_action_needed(
         manual_market_price_eur=manual_market_price_eur,
         manual_status=manual_status,
     )
+    if auction_is_ended:
+        manual_action_needed = ""
     risk_flags = build_risk_flags(
         title=title,
         context_text=context_text,
@@ -2298,7 +3250,13 @@ def build_sheet_row(
         decision=decision,
         manual_market_price_eur=manual_market_price_eur,
         seller_rating=listing_metadata.get("seller_rating", ""),
+        auction_is_ended=auction_is_ended,
     )
+    forced_skip_flags = {"GRADED", "DAMAGED", "OLD_CARD_SINGLE", "MYSTERY_PACK", "SEARCHED_PACK"}
+    if decision not in (DECISION_IGNORE,) and any(flag in risk_flags for flag in forced_skip_flags):
+        decision = DECISION_SKIP
+    if auction_is_ended:
+        decision = DECISION_SKIP
     deal_quality_score = compute_deal_quality_score(
         listing_type=listing_type,
         matched_product_japanese=matched_product_japanese,
@@ -2307,6 +3265,7 @@ def build_sheet_row(
         risk_flags=risk_flags,
         decision=decision,
     )
+    score_reliability = get_score_reliability(listing_type, market_price_confidence, decision)
     return {
         "created_at": str(deal.get("detected_at", "")),
         "source": "Yahoo Auctions Japan",
@@ -2318,11 +3277,19 @@ def build_sheet_row(
         "decision": decision,
         "manual_action_needed": manual_action_needed,
         "title": title,
+        "opportunity_type": opportunity_type,
         "price_yen": str(price_yen or ""),
+        "price_source": price_source,
         "current_price_yen": listing_metadata.get("current_price_yen", ""),
         "buy_now_price_yen": listing_metadata.get("buy_now_price_yen", ""),
         "bid_count": listing_metadata.get("bid_count", ""),
         "time_left": listing_metadata.get("time_left", ""),
+        "time_left_minutes": listing_metadata.get("time_left_minutes", ""),
+        "auction_end_at": listing_metadata.get("auction_end_at", ""),
+        "auction_ending_soon": listing_metadata.get("auction_ending_soon", AUCTION_ENDING_UNKNOWN),
+        "time_left_source": listing_metadata.get("time_left_source", "unknown"),
+        "raw_time_left_text": listing_metadata.get("raw_time_left_text", ""),
+        "auction_is_ended": "True" if auction_is_ended else "False",
         "seller_name": listing_metadata.get("seller_name", ""),
         "seller_rating": listing_metadata.get("seller_rating", ""),
         "shipping_japan": listing_metadata.get("shipping_japan", ""),
@@ -2370,16 +3337,30 @@ def build_sheet_row(
 def sort_rows_for_watch(rows: List[Dict[str, str]], hide_skip: bool, prefer_buy_now: bool) -> List[Dict[str, str]]:
     filtered = rows
     if hide_skip:
-        filtered = [row for row in rows if row.get("decision") not in (DECISION_SKIP, DECISION_IGNORE)]
+        filtered = [
+            row
+            for row in rows
+            if row.get("decision") not in (DECISION_SKIP, DECISION_IGNORE) and not is_row_auction_ended(row)
+        ]
+
+    def auction_time_sort_key(row: Dict[str, str]) -> tuple:
+        listing_type = row.get("listing_type", LISTING_TYPE_UNKNOWN)
+        if listing_type not in (LISTING_TYPE_AUCTION, LISTING_TYPE_LOW_START_AUCTION):
+            return (1, 10**9)
+        minutes = row.get("time_left_minutes", "")
+        if minutes in ("", None):
+            return (0, 10**9)
+        return (0, int(to_float(minutes)))
 
     def sort_key(row: Dict[str, str]) -> tuple:
         decision_part = decision_rank(row.get("decision", DECISION_SKIP))
         roi_part = -to_float(row.get("roi_percent", 0.0))
         profit_part = -to_float(row.get("profit_eur", 0.0))
+        auction_time_part = auction_time_sort_key(row)
         if prefer_buy_now:
             type_part = listing_type_rank(row.get("listing_type", LISTING_TYPE_UNKNOWN))
-            return (decision_part, type_part, roi_part, profit_part)
-        return (decision_part, roi_part, profit_part)
+            return (decision_part, type_part, auction_time_part, roi_part, profit_part)
+        return (decision_part, auction_time_part, roi_part, profit_part)
 
     filtered.sort(key=sort_key)
     return filtered
@@ -2403,6 +3384,7 @@ def sort_best_deals_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     best_rows = [
         row
         for row in rows
+        if not is_row_auction_ended(row)
         if row.get("decision") in (
             DECISION_BUY_ALERT,
             DECISION_WATCH,
@@ -2411,13 +3393,45 @@ def sort_best_deals_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
             DECISION_NEEDS_PRICE,
         )
     ]
-    return sort_rows_for_watch(best_rows, hide_skip=True, prefer_buy_now=True)
+
+    def strategic_rank(row: Dict[str, str]) -> int:
+        title = row.get("title", "")
+        matched_product = row.get("matched_product_japanese", "")
+        risk_flags = str(row.get("risk_flags", "") or "")
+        if is_sealed_box_or_display(title, matched_product):
+            return 0
+        if "GOOD_CONDITION_LOOSE" in risk_flags:
+            return 1
+        if "OLD_BACK_LOT" in risk_flags:
+            return 2
+        return 3
+
+    def sort_key(row: Dict[str, str]) -> tuple:
+        manual_price = to_float(row.get("manual_market_price_eur", ""))
+        roi = to_float(row.get("roi_percent", 0.0))
+        profit = to_float(row.get("profit_eur", 0.0))
+        minutes_raw = row.get("time_left_minutes", "")
+        minutes_known = minutes_raw not in ("", None)
+        minutes_value = int(to_float(minutes_raw)) if minutes_known else 10**9
+        return (
+            decision_rank(row.get("decision", DECISION_SKIP)),
+            0 if manual_price > 0 and roi > 0 else 1,
+            strategic_rank(row),
+            0 if minutes_known else 1,
+            minutes_value,
+            -roi,
+            -profit,
+        )
+
+    best_rows.sort(key=sort_key)
+    return best_rows
 
 
 def sort_buy_now_deals_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     filtered = [
         row
         for row in rows
+        if not is_row_auction_ended(row)
         if row.get("listing_type") in (LISTING_TYPE_BUY_NOW, LISTING_TYPE_FIXED_PRICE)
         and row.get("decision") in (DECISION_BUY_ALERT, DECISION_WATCH, DECISION_NEEDS_PRICE)
     ]
@@ -2438,20 +3452,19 @@ def sort_auctions_watch_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]
     filtered = [
         row
         for row in rows
+        if not is_row_auction_ended(row)
         if row.get("decision") in (DECISION_WATCH_AUCTION, DECISION_WATCH_LOW_AUCTION)
     ]
 
-    def time_left_key(value: str) -> tuple:
-        if not value:
-            return (1, "")
-        return (0, value)
-
     def sort_key(row: Dict[str, str]) -> tuple:
+        minutes_raw = row.get("time_left_minutes", "")
+        minutes_known = minutes_raw not in ("", None)
+        minutes_value = int(to_float(minutes_raw)) if minutes_known else 10**9
         return (
-            decision_rank(row.get("decision", DECISION_SKIP)),
-            time_left_key(row.get("time_left", "")),
-            -to_float(row.get("deal_quality_score", 0.0)),
+            0 if minutes_known else 1,
+            minutes_value,
             -to_float(row.get("roi_percent", 0.0)),
+            -to_float(row.get("profit_eur", 0.0)),
         )
 
     filtered.sort(key=sort_key)
@@ -2459,11 +3472,13 @@ def sort_auctions_watch_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]
 
 
 def sort_needs_price_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    filtered = [row for row in rows if row.get("decision") == DECISION_NEEDS_PRICE]
+    filtered = [
+        row for row in rows if row.get("decision") == DECISION_NEEDS_PRICE and not is_row_auction_ended(row)
+    ]
 
     def sort_key(row: Dict[str, str]) -> tuple:
         return (
-            listing_type_rank(row.get("listing_type", LISTING_TYPE_UNKNOWN)),
+            needs_price_priority(row),
             -to_float(row.get("deal_quality_score", 0.0)),
             -to_float(row.get("roi_percent", 0.0)),
             -to_float(row.get("profit_eur", 0.0)),
@@ -2471,6 +3486,1106 @@ def sort_needs_price_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
 
     filtered.sort(key=sort_key)
     return filtered
+
+
+def merge_listing_metadata_dicts(base: Dict[str, str], extra: Dict[str, str]) -> Dict[str, str]:
+    merged = dict(base)
+    for key, value in extra.items():
+        if value not in ("", None):
+            merged[key] = value
+    return merged
+
+
+def persist_listing_metadata(conn: sqlite3.Connection, listing_id: str, metadata: Dict[str, str]) -> None:
+    if not listing_id:
+        return
+    conn.execute(
+        """
+        UPDATE deals
+        SET price_yen = ?,
+            price_source = ?,
+            current_price_yen = ?,
+            buy_now_price_yen = ?,
+            bid_count = ?,
+            time_left = ?,
+            time_left_minutes = ?,
+            auction_end_at = ?,
+            auction_ending_soon = ?,
+            time_left_source = ?,
+            raw_time_left_text = ?,
+            auction_is_ended = ?,
+            seller_name = ?,
+            seller_rating = ?,
+            shipping_japan = ?
+        WHERE listing_id = ?
+        """,
+        (
+            int(to_float(metadata.get("price_yen", 0))) or None,
+            normalize_price_source(metadata.get("price_source", "unknown")),
+            int(to_float(metadata.get("current_price_yen", 0))) or None,
+            int(to_float(metadata.get("buy_now_price_yen", 0))) or None,
+            int(to_float(metadata.get("bid_count", 0))) or None,
+            metadata.get("time_left", ""),
+            int(to_float(metadata.get("time_left_minutes", 0))) if metadata.get("time_left_minutes", "") not in ("", None) else None,
+            metadata.get("auction_end_at", ""),
+            metadata.get("auction_ending_soon", AUCTION_ENDING_UNKNOWN),
+            metadata.get("time_left_source", "unknown"),
+            metadata.get("raw_time_left_text", ""),
+            metadata.get("auction_is_ended", "False"),
+            metadata.get("seller_name", ""),
+            metadata.get("seller_rating", ""),
+            metadata.get("shipping_japan", ""),
+            listing_id,
+        ),
+    )
+    conn.commit()
+
+
+def parse_optional_int(value: object) -> Optional[int]:
+    if value in ("", None):
+        return None
+    parsed = int(to_float(value))
+    return parsed if parsed != 0 else 0
+
+
+def normalize_price_source(value: str) -> str:
+    cleaned = (value or "").strip()
+    cleaned = REVERSE_DISPLAY_VALUE_MAPS.get("price_source", {}).get(cleaned, cleaned)
+    if cleaned in {"zenmarket_detail", "yahoo_detail", "yahoo_search", "sqlite_cache", "unknown"}:
+        return cleaned
+    return "unknown"
+
+
+def to_optional_int_str(value: object) -> str:
+    if value in ("", None):
+        return ""
+    return str(int(to_float(value)))
+
+
+def select_primary_purchase_price(
+    listing_type: str,
+    base_price_yen: int,
+    current_price_yen: Optional[int],
+    buy_now_price_yen: Optional[int],
+) -> int:
+    current_value = current_price_yen or 0
+    buy_now_value = buy_now_price_yen or 0
+    if listing_type in (LISTING_TYPE_BUY_NOW, LISTING_TYPE_FIXED_PRICE):
+        if buy_now_value > 0:
+            return buy_now_value
+        if current_value > 0:
+            return current_value
+    if listing_type in (LISTING_TYPE_AUCTION, LISTING_TYPE_LOW_START_AUCTION):
+        if current_value > 0:
+            return current_value
+    if base_price_yen > 0:
+        return base_price_yen
+    if current_value > 0:
+        return current_value
+    if buy_now_value > 0:
+        return buy_now_value
+    return 0
+
+
+def choose_price_source(deal: Dict[str, object], metadata: Dict[str, str], fallback: str = "unknown") -> str:
+    stored = normalize_price_source(str(deal.get("price_source", "") or ""))
+    if stored != "unknown":
+        return stored
+    if metadata.get("current_price_yen") or metadata.get("buy_now_price_yen"):
+        return "sqlite_cache"
+    if int(to_float(deal.get("price_yen", 0))) > 0:
+        return fallback
+    return "unknown"
+
+
+def parse_zenmarket_datetime(value: str) -> Optional[dt.datetime]:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return None
+    for fmt in ("%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p"):
+        try:
+            return dt.datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def format_duration_from_minutes(total_minutes: int) -> str:
+    if total_minutes <= 0:
+        return "Terminé"
+    days, remainder = divmod(total_minutes, 60 * 24)
+    hours, minutes = divmod(remainder, 60)
+    parts: List[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes and len(parts) < 3:
+        parts.append(f"{minutes}m")
+    return " ".join(parts) if parts else f"{total_minutes}m"
+
+
+def is_meaningful_detail_metadata(metadata: Dict[str, str]) -> bool:
+    return any(
+        metadata.get(field)
+        for field in (
+            "current_price_yen",
+            "buy_now_price_yen",
+            "bid_count",
+            "time_left",
+            "time_left_minutes",
+            "auction_end_at",
+        )
+    ) or metadata.get("auction_is_ended", "False") == "True"
+
+
+def is_suspicious_time_left(
+    time_left: str,
+    time_left_minutes: object,
+    time_left_source: str = "",
+    raw_time_left_text: str = "",
+) -> bool:
+    normalized_time = normalize_numeric_text(time_left or "").casefold()
+    normalized_raw = normalize_numeric_text(raw_time_left_text or "").casefold()
+    source = normalize_price_source(time_left_source or "unknown")
+    minutes = parse_optional_int(time_left_minutes)
+    if minutes is None:
+        return False
+    if minutes == 12960 or normalized_time in {"9 jours", "9 days", "9 day"}:
+        return source in {"unknown", "yahoo_search", "sqlite_cache"} or not normalized_raw
+    if minutes >= 7 * 1440 and source in {"unknown", "yahoo_search", "sqlite_cache"}:
+        return True
+    return False
+
+
+def clear_time_left_fields(metadata: Dict[str, str], source: str = "unknown") -> Dict[str, str]:
+    cleared = dict(metadata)
+    cleared["time_left"] = ""
+    cleared["time_left_minutes"] = ""
+    cleared["auction_ending_soon"] = AUCTION_ENDING_UNKNOWN
+    cleared["auction_end_at"] = ""
+    cleared["time_left_source"] = source
+    return cleared
+
+
+def parse_zenmarket_listing_metadata(text: str) -> Dict[str, str]:
+    haystack = combine_context(text)
+
+    def _extract(pattern: re.Pattern[str]) -> str:
+        match = pattern.search(haystack)
+        if not match:
+            return ""
+        return match.group(1).replace(",", "").strip()
+
+    current_price = _extract(ZENMARKET_CURRENT_PRICE_RE)
+    buy_now_price = _extract(ZENMARKET_BUY_NOW_PRICE_RE)
+    bid_count = _extract(ZENMARKET_BID_COUNT_RE)
+    time_left = ""
+    time_left_match = ZENMARKET_TIME_LEFT_RE.search(haystack)
+    if time_left_match:
+        time_left = normalize_text(time_left_match.group(1))
+
+    end_match = ZENMARKET_ENDS_AT_RE.search(haystack)
+    now_match = ZENMARKET_CURRENT_TIME_RE.search(haystack)
+    end_dt = parse_zenmarket_datetime(end_match.group(1)) if end_match else None
+    current_dt = parse_zenmarket_datetime(now_match.group(1)) if now_match else None
+
+    if not time_left and end_dt and current_dt:
+        diff_minutes = max(0, int((end_dt - current_dt).total_seconds() // 60))
+        time_left = format_duration_from_minutes(diff_minutes)
+
+    normalized_time = normalize_numeric_text(time_left)
+    explicit_ended = "this auction ends in auction ended" in normalize_numeric_text(haystack).casefold()
+    auction_is_ended = explicit_ended or normalized_time.casefold() == "auction ended"
+    if not auction_is_ended and end_dt and current_dt and end_dt <= current_dt:
+        auction_is_ended = True
+
+    if auction_is_ended:
+        time_left = "Terminé"
+        time_left_minutes = 0
+        auction_ending_soon = AUCTION_ENDING_ENDED
+    else:
+        time_left_minutes = parse_time_left_to_minutes(time_left) if time_left else None
+        if time_left_minutes is None and end_dt and current_dt:
+            time_left_minutes = max(0, int((end_dt - current_dt).total_seconds() // 60))
+            if not time_left:
+                time_left = format_duration_from_minutes(time_left_minutes)
+        auction_ending_soon = get_auction_ending_soon_value(time_left_minutes)
+
+    shipping_match = ZENMARKET_SHIPPING_RE.search(haystack)
+    shipping_japan = shipping_match.group(1).strip() if shipping_match else ""
+    if shipping_japan.casefold() == "free":
+        shipping_japan = "送料無料"
+
+    if not current_price and buy_now_price:
+        current_price = buy_now_price
+
+    return {
+        "current_price_yen": current_price,
+        "buy_now_price_yen": buy_now_price,
+        "bid_count": bid_count,
+        "time_left": time_left,
+        "time_left_minutes": str(time_left_minutes) if time_left_minutes is not None else "",
+        "auction_end_at": end_dt.strftime("%Y-%m-%d %H:%M:%S JST") if end_dt else "",
+        "auction_ending_soon": auction_ending_soon,
+        "time_left_source": "zenmarket_detail" if (time_left or time_left_minutes is not None or auction_is_ended) else "unknown",
+        "raw_time_left_text": time_left,
+        "auction_is_ended": "True" if auction_is_ended else "False",
+        "shipping_japan": shipping_japan,
+    }
+
+
+def fetch_zenmarket_detail(
+    session: requests.Session,
+    yahoo_url: str,
+    timeout_seconds: Optional[int] = None,
+) -> Tuple[Dict[str, str], str, bool, str]:
+    zenmarket_url = build_zenmarket_auction_url(yahoo_url)
+    if not zenmarket_url:
+        return {}, "", False, "missing_zenmarket_url"
+    detail_markdown, fetch_error = fetch_reader_content_verbose(
+        session,
+        build_reader_url_from_target_url(zenmarket_url),
+        f"zenmarket detail page '{zenmarket_url}'",
+        timeout_seconds=timeout_seconds or config.ZENMARKET_TIMEOUT_SECONDS,
+        retries=0,
+    )
+    if not detail_markdown:
+        return {}, zenmarket_url, False, fetch_error or "empty_zenmarket_response"
+    metadata = parse_zenmarket_listing_metadata(detail_markdown)
+    success = is_meaningful_detail_metadata(metadata)
+    return metadata, zenmarket_url, success, "" if success else "zenmarket_no_relevant_data"
+
+
+def load_detail_enrichment_cache_entry(conn: sqlite3.Connection, url: str) -> Optional[Dict[str, object]]:
+    if not url:
+        return None
+    cursor = conn.execute(
+        """
+        SELECT url, last_checked_at, zenmarket_last_checked_at, zenmarket_success, zenmarket_error,
+               time_left, time_left_minutes, auction_end_at, auction_is_ended, time_left_source, raw_time_left_text,
+               current_price_yen, buy_now_price_yen, bid_count, price_source, success, error
+        FROM detail_enrichment_cache
+        WHERE url = ?
+        """,
+        (url,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    columns = [
+        "url",
+        "last_checked_at",
+        "zenmarket_last_checked_at",
+        "zenmarket_success",
+        "zenmarket_error",
+        "time_left",
+        "time_left_minutes",
+        "auction_end_at",
+        "auction_is_ended",
+        "time_left_source",
+        "raw_time_left_text",
+        "current_price_yen",
+        "buy_now_price_yen",
+        "bid_count",
+        "price_source",
+        "success",
+        "error",
+    ]
+    return dict(zip(columns, row))
+
+
+def is_detail_cache_recent(cache_entry: Optional[Dict[str, object]]) -> bool:
+    if not cache_entry:
+        return False
+    zenmarket_checked_at = str(cache_entry.get("zenmarket_last_checked_at", "") or "").strip()
+    if not zenmarket_checked_at:
+        return False
+    try:
+        checked_at = dt.datetime.fromisoformat(zenmarket_checked_at)
+    except ValueError:
+        return False
+    cutoff = dt.datetime.utcnow() - dt.timedelta(hours=config.FINAL_DEALS_DOUBLE_CHECK_CACHE_HOURS)
+    return checked_at >= cutoff
+
+
+def is_true_like(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def can_skip_detail_refresh_from_cache(
+    cache_entry: Optional[Dict[str, object]],
+    current_price_source: str,
+) -> bool:
+    if not is_detail_cache_recent(cache_entry):
+        return False
+    if normalize_price_source(current_price_source) != "zenmarket_detail":
+        return False
+    if normalize_price_source(str((cache_entry or {}).get("price_source", "") or "")) != "zenmarket_detail":
+        return False
+    return is_true_like((cache_entry or {}).get("zenmarket_success", False))
+
+
+def upsert_detail_enrichment_cache(
+    conn: sqlite3.Connection,
+    url: str,
+    metadata: Dict[str, str],
+    success: bool,
+    zenmarket_attempted: bool = False,
+    zenmarket_success: bool = False,
+    zenmarket_error: str = "",
+    error: str = "",
+) -> None:
+    if not url:
+        return
+    conn.execute(
+        """
+        INSERT INTO detail_enrichment_cache (
+            url, last_checked_at, zenmarket_last_checked_at, zenmarket_success, zenmarket_error,
+            time_left, time_left_minutes, auction_end_at, auction_is_ended, time_left_source, raw_time_left_text,
+            current_price_yen, buy_now_price_yen, bid_count, price_source, success, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(url) DO UPDATE SET
+            last_checked_at = excluded.last_checked_at,
+            zenmarket_last_checked_at = excluded.zenmarket_last_checked_at,
+            zenmarket_success = excluded.zenmarket_success,
+            zenmarket_error = excluded.zenmarket_error,
+            time_left = excluded.time_left,
+            time_left_minutes = excluded.time_left_minutes,
+            auction_end_at = excluded.auction_end_at,
+            auction_is_ended = excluded.auction_is_ended,
+            time_left_source = excluded.time_left_source,
+            raw_time_left_text = excluded.raw_time_left_text,
+            current_price_yen = excluded.current_price_yen,
+            buy_now_price_yen = excluded.buy_now_price_yen,
+            bid_count = excluded.bid_count,
+            price_source = excluded.price_source,
+            success = excluded.success,
+            error = excluded.error
+        """,
+        (
+            url,
+            utc_now_iso(),
+            utc_now_iso() if zenmarket_attempted else "",
+            "True" if zenmarket_success else "False",
+            (zenmarket_error or "")[:500],
+            metadata.get("time_left", ""),
+            parse_optional_int(metadata.get("time_left_minutes", "")),
+            metadata.get("auction_end_at", ""),
+            metadata.get("auction_is_ended", "False"),
+            metadata.get("time_left_source", "unknown"),
+            metadata.get("raw_time_left_text", ""),
+            parse_optional_int(metadata.get("current_price_yen", "")),
+            parse_optional_int(metadata.get("buy_now_price_yen", "")),
+            parse_optional_int(metadata.get("bid_count", "")),
+            normalize_price_source(metadata.get("price_source", "unknown")),
+            "True" if success else "False",
+            (error or "")[:500],
+        ),
+    )
+    conn.commit()
+
+
+def append_detail_enrichment_log(rows: List[Dict[str, str]]) -> None:
+    if not rows:
+        return
+    headers = [
+        "run_at",
+        "mode",
+        "title",
+        "url",
+        "zenmarket_url",
+        "zenmarket_attempted",
+        "zenmarket_success",
+        "zenmarket_retry_count",
+        "zenmarket_error",
+        "zenmarket_retry_needed",
+        "fallback_used",
+        "old_price_source",
+        "new_price_source",
+        "old_price_yen",
+        "new_price_yen",
+        "old_time_left",
+        "new_time_left",
+        "old_time_left_minutes",
+        "new_time_left_minutes",
+        "time_left_source",
+        "raw_time_left_text",
+        "suspicious_time_left",
+        "cleared_suspicious_time_left",
+        "old_auction_is_ended",
+        "new_auction_is_ended",
+        "old_current_price_yen",
+        "new_current_price_yen",
+        "old_buy_now_price_yen",
+        "new_buy_now_price_yen",
+        "old_bid_count",
+        "new_bid_count",
+        "updated",
+        "skipped_by_cache",
+        "error",
+    ]
+    write_mode = "a"
+    if os.path.exists(DETAIL_ENRICHMENT_LOG_PATH):
+        with open(DETAIL_ENRICHMENT_LOG_PATH, "r", encoding="utf-8", newline="") as existing_handle:
+            first_line = existing_handle.readline().strip()
+        if first_line != ",".join(headers):
+            write_mode = "w"
+    else:
+        write_mode = "w"
+    with open(DETAIL_ENRICHMENT_LOG_PATH, write_mode, newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        if write_mode == "w":
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({header: row.get(header, "") for header in headers})
+
+
+def row_has_excluded_double_check_risk(row: Dict[str, str]) -> bool:
+    risk_flags = str(row.get("risk_flags", "") or "")
+    return any(flag in risk_flags for flag in DOUBLE_CHECK_EXCLUDED_RISK_FLAGS)
+
+
+def is_final_useful_candidate_row(row: Dict[str, str]) -> bool:
+    decision = row.get("decision", "")
+    if decision not in FINAL_USEFUL_DECISIONS:
+        return False
+    if decision in (DECISION_SKIP, DECISION_IGNORE):
+        return False
+    if is_row_auction_ended(row):
+        return False
+    if row_has_excluded_double_check_risk(row):
+        return False
+    url = str(row.get("url", "")).strip()
+    if not extract_yahoo_auction_id(url):
+        return False
+    if decision == DECISION_NEEDS_PRICE:
+        title = row.get("title", "")
+        matched_product = row.get("matched_product_japanese", "")
+        risk_flags = str(row.get("risk_flags", "") or "")
+        if not (
+            is_sealed_box_or_display(title, matched_product)
+            or "GOOD_CONDITION_LOOSE" in risk_flags
+            or "OLD_BACK_LOT" in risk_flags
+        ):
+            return False
+    return True
+
+
+def final_deal_double_check_priority(row: Dict[str, str]) -> tuple:
+    decision = row.get("decision", "")
+    risk_flags = str(row.get("risk_flags", "") or "")
+    title = row.get("title", "")
+    matched_product = row.get("matched_product_japanese", "")
+    manual_price_filled = to_float(row.get("manual_market_price_eur", "")) > 0
+    time_unknown = row.get("time_left_minutes", "") in ("", None)
+    listing_type = row.get("listing_type", LISTING_TYPE_UNKNOWN)
+    is_auction_type = listing_type in (LISTING_TYPE_AUCTION, LISTING_TYPE_LOW_START_AUCTION)
+    is_box = is_sealed_box_or_display(title, matched_product)
+    is_good_loose = "GOOD_CONDITION_LOOSE" in risk_flags
+    is_old_back_lot = "OLD_BACK_LOT" in risk_flags
+    group_rank = 3
+    if decision in (DECISION_WATCH_AUCTION, DECISION_WATCH_LOW_AUCTION):
+        group_rank = 0
+    elif decision == DECISION_NEEDS_PRICE and (is_box or is_good_loose or is_old_back_lot):
+        group_rank = 1
+    elif manual_price_filled:
+        group_rank = 2
+    return (
+        group_rank,
+        0 if time_unknown else 1,
+        0 if manual_price_filled else 1,
+        0 if is_auction_type else 1,
+        0 if is_box else 1,
+        0 if is_good_loose else 1,
+        0 if is_old_back_lot else 1,
+        -to_float(row.get("deal_quality_score", 0.0)),
+        to_float(row.get("price_yen", 0.0)),
+    )
+
+
+def row_has_possible_buy_now_signal(row: Dict[str, str]) -> bool:
+    listing_type = row.get("listing_type", LISTING_TYPE_UNKNOWN)
+    if listing_type in (LISTING_TYPE_BUY_NOW, LISTING_TYPE_FIXED_PRICE):
+        return True
+    haystack = combine_context(
+        row.get("title", ""),
+        row.get("query", ""),
+        row.get("rule_name", ""),
+        row.get("matched_product_japanese", ""),
+    )
+    buy_now_keywords = list(config.LISTING_TYPE_KEYWORDS.get("buy_now", []))
+    fixed_price_keywords = list(config.LISTING_TYPE_KEYWORDS.get("fixed_price", []))
+    return any(keyword and keyword in haystack for keyword in buy_now_keywords + fixed_price_keywords)
+
+
+def best_deals_refresh_priority(row: Dict[str, str], is_best_row: bool) -> tuple:
+    current_source = normalize_price_source(row.get("price_source", "") or "")
+    missing_buy_now = to_float(row.get("buy_now_price_yen", "")) <= 0
+    time_unknown = row.get("time_left_minutes", "") in ("", None)
+    if is_best_row:
+        if current_source != "zenmarket_detail":
+            primary_rank = 0
+        elif missing_buy_now and row_has_possible_buy_now_signal(row):
+            primary_rank = 1
+        elif time_unknown:
+            primary_rank = 2
+        else:
+            primary_rank = 3
+        return (primary_rank,) + final_deal_double_check_priority(row)
+    return (4,) + final_deal_double_check_priority(row)
+
+
+def should_retry_zenmarket_for_best_row(
+    row: Dict[str, str],
+    cache_entry: Optional[Dict[str, object]],
+    force_refresh: bool,
+) -> bool:
+    if not config.ZENMARKET_REQUIRED_FOR_BEST_DEALS:
+        return False
+    if force_refresh:
+        return True
+    if not str(row.get("link_for_zenmarket", "") or "").strip():
+        return False
+    current_source = normalize_price_source(row.get("price_source", "") or "")
+    if current_source != "zenmarket_detail":
+        return True
+    return not can_skip_detail_refresh_from_cache(cache_entry, current_source)
+
+
+def fetch_zenmarket_detail_with_retries(
+    session: requests.Session,
+    yahoo_url: str,
+    max_retries: int,
+    deadline_monotonic: Optional[float] = None,
+) -> Tuple[Dict[str, str], str, bool, str, int, int]:
+    zenmarket_url = build_zenmarket_auction_url(yahoo_url)
+    if not zenmarket_url:
+        return {}, "", False, "missing_zenmarket_url", 0, 0
+
+    attempts = 0
+    retry_count = 0
+    last_error = ""
+    last_metadata: Dict[str, str] = {}
+
+    for attempt_index in range(max(1, max_retries)):
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            last_error = "zenmarket_time_budget_exceeded"
+            break
+        attempts += 1
+        metadata, returned_url, success, error = fetch_zenmarket_detail(
+            session,
+            yahoo_url,
+            timeout_seconds=config.ZENMARKET_TIMEOUT_SECONDS,
+        )
+        if returned_url:
+            zenmarket_url = returned_url
+        if success:
+            return metadata, zenmarket_url, True, "", retry_count, attempts
+
+        last_metadata = metadata
+        last_error = error or "zenmarket_unknown_error"
+        if attempt_index >= max_retries - 1:
+            break
+        retry_count += 1
+        sleep_seconds = config.ZENMARKET_SLEEP_BETWEEN_RETRIES_SECONDS * (
+            max(1.0, config.ZENMARKET_BACKOFF_MULTIPLIER ** attempt_index)
+        )
+        if deadline_monotonic is not None:
+            remaining_seconds = deadline_monotonic - time.monotonic()
+            if remaining_seconds <= 0:
+                last_error = "zenmarket_time_budget_exceeded"
+                break
+            sleep_seconds = min(sleep_seconds, max(0.0, remaining_seconds))
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+    return last_metadata, zenmarket_url, False, last_error or "zenmarket_retries_exhausted", retry_count, attempts
+
+
+def double_check_final_deals_details(
+    session: requests.Session,
+    conn: sqlite3.Connection,
+    deals: List[Dict[str, object]],
+    existing_sheet_data: Optional[Dict[str, Dict[str, str]]] = None,
+    force_refresh: bool = False,
+    zenmarket_full_refresh: bool = False,
+) -> Dict[str, int]:
+    stats = {
+        "candidates": 0,
+        "attempted": 0,
+        "updated": 0,
+        "skipped_cache": 0,
+        "errors": 0,
+        "ended_detected": 0,
+        "time_updated": 0,
+        "price_updated": 0,
+        "bid_updated": 0,
+        "suspicious_detected": 0,
+        "suspicious_cleared": 0,
+        "zenmarket_attempted": 0,
+        "zenmarket_success": 0,
+        "zenmarket_errors": 0,
+        "zenmarket_current_price_updated": 0,
+        "zenmarket_buy_now_updated": 0,
+        "fallback_yahoo_used": 0,
+        "price_source_zenmarket_detail": 0,
+        "price_source_yahoo_detail": 0,
+        "price_source_yahoo_search": 0,
+        "price_source_sqlite_cache": 0,
+        "price_source_unknown": 0,
+        "best_lines_total": 0,
+        "best_lines_buy_now_price": 0,
+        "best_lines_auction_plus_buy_now": 0,
+        "best_lines_time_9_days": 0,
+        "best_lines_minutes_12960": 0,
+        "best_time_source_zenmarket": 0,
+        "best_time_source_yahoo": 0,
+        "best_time_source_unknown": 0,
+        "best_without_zenmarket_link": 0,
+        "best_zenmarket_attempted": 0,
+        "best_zenmarket_success": 0,
+        "best_zenmarket_errors": 0,
+        "best_already_zenmarket": 0,
+        "best_to_retry_zenmarket": 0,
+        "best_non_zenmarket_after_run": 0,
+        "zenmarket_retries": 0,
+        "zenmarket_fail_after_retries": 0,
+        "zenmarket_duration_seconds": 0,
+    }
+    if not config.DETAIL_ENRICHMENT_ENABLED or not config.FINAL_DEALS_DOUBLE_CHECK_ENABLED:
+        return stats
+
+    zenmarket_run_started_at = time.monotonic()
+    zenmarket_max_minutes = 90 if zenmarket_full_refresh else config.ZENMARKET_MAX_TOTAL_MINUTES_PER_RUN
+    zenmarket_deadline = zenmarket_run_started_at + (zenmarket_max_minutes * 60)
+
+    existing_sheet_data = existing_sheet_data or {}
+    base_rows = [
+        build_sheet_row(
+            deal,
+            conn=conn,
+            existing_sheet_values=existing_sheet_data.get(str(deal.get("url", "")).strip(), {}),
+        )
+        for deal in deals
+    ]
+    best_rows_all = sort_best_deals_rows(base_rows)
+    best_urls = {str(row.get("url", "")).strip() for row in best_rows_all if str(row.get("url", "")).strip()}
+    deal_by_url = {str(deal.get("url", "")).strip(): deal for deal in deals if str(deal.get("url", "")).strip()}
+    candidates: List[Tuple[Dict[str, str], Dict[str, object]]] = []
+    seen_urls = set()
+    for row in base_rows:
+        url = str(row.get("url", "")).strip()
+        if not url or url in seen_urls:
+            continue
+        is_best_row = url in best_urls
+        if is_best_row:
+            if is_row_auction_ended(row):
+                continue
+            if not extract_yahoo_auction_id(url):
+                continue
+        elif not is_final_useful_candidate_row(row):
+            continue
+        deal = deal_by_url.get(url)
+        if not deal:
+            continue
+        candidates.append((row, deal))
+        seen_urls.add(url)
+
+    if config.BEST_DEALS_ZENMARKET_REFRESH_ENABLED:
+        candidates.sort(key=lambda pair: best_deals_refresh_priority(pair[0], str(pair[0].get("url", "")).strip() in best_urls))
+    else:
+        candidates.sort(key=lambda pair: final_deal_double_check_priority(pair[0]))
+    max_candidates = config.FINAL_DEALS_DOUBLE_CHECK_MAX_PAGES
+    if config.BEST_DEALS_ZENMARKET_REFRESH_ENABLED:
+        max_candidates = max(max_candidates, config.BEST_DEALS_ZENMARKET_REFRESH_MAX_PAGES)
+    if zenmarket_full_refresh:
+        max_candidates = max(max_candidates, len(best_rows_all))
+    if len(candidates) > max_candidates:
+        candidates = candidates[:max_candidates]
+    stats["candidates"] = len(candidates)
+
+    run_at = utc_now_iso()
+    mode = "zenmarket_full_refresh" if zenmarket_full_refresh else "force_detail_refresh" if force_refresh else "normal"
+    log_rows: List[Dict[str, str]] = []
+    consecutive_errors = 0
+    best_retry_candidates = 0
+    best_already_zenmarket = 0
+    best_non_zenmarket_after_run = 0
+    best_urls_in_candidates = {str(row.get("url", "")).strip() for row, _deal in candidates if str(row.get("url", "")).strip() in best_urls}
+
+    for index, (row, deal) in enumerate(candidates, start=1):
+        if time.monotonic() >= zenmarket_deadline:
+            logging.warning("ZenMarket detail enrichment stopped after reaching the run time budget (%s minutes).", zenmarket_max_minutes)
+            break
+
+        url = str(row.get("url", "")).strip()
+        is_best_row = url in best_urls
+        row_sleep_seconds = config.FINAL_DEALS_DOUBLE_CHECK_SLEEP_SECONDS
+        if is_best_row and config.ZENMARKET_REQUIRED_FOR_BEST_DEALS:
+            row_sleep_seconds = config.ZENMARKET_SLEEP_BETWEEN_ITEMS_SECONDS
+        elif is_best_row and config.BEST_DEALS_ZENMARKET_REFRESH_ENABLED:
+            row_sleep_seconds = config.BEST_DEALS_ZENMARKET_REFRESH_SLEEP_SECONDS
+        title = str(deal.get("title", "") or row.get("title", ""))
+        current_metadata = {
+            "price_yen": str(deal.get("price_yen", "") or ""),
+            "price_source": str(deal.get("price_source", "") or ""),
+            "current_price_yen": str(deal.get("current_price_yen", "") or ""),
+            "buy_now_price_yen": str(deal.get("buy_now_price_yen", "") or ""),
+            "bid_count": str(deal.get("bid_count", "") or ""),
+            "time_left": str(deal.get("time_left", "") or ""),
+            "time_left_minutes": str(deal.get("time_left_minutes", "") or ""),
+            "auction_end_at": str(deal.get("auction_end_at", "") or ""),
+            "auction_ending_soon": str(deal.get("auction_ending_soon", "") or ""),
+            "time_left_source": str(deal.get("time_left_source", "") or ""),
+            "raw_time_left_text": str(deal.get("raw_time_left_text", "") or ""),
+            "auction_is_ended": str(deal.get("auction_is_ended", "") or ""),
+            "seller_name": str(deal.get("seller_name", "") or ""),
+            "seller_rating": str(deal.get("seller_rating", "") or ""),
+            "shipping_japan": str(deal.get("shipping_japan", "") or ""),
+        }
+        log_entry = {
+            "run_at": run_at,
+            "mode": mode,
+            "url": url,
+            "zenmarket_url": build_zenmarket_auction_url(url),
+            "zenmarket_attempted": "False",
+            "zenmarket_success": "False",
+            "zenmarket_retry_count": "0",
+            "zenmarket_error": "",
+            "zenmarket_retry_needed": "False",
+            "fallback_used": "False",
+            "title": title,
+            "old_price_source": normalize_price_source(current_metadata.get("price_source", "unknown")),
+            "new_price_source": normalize_price_source(current_metadata.get("price_source", "unknown")),
+            "old_price_yen": current_metadata.get("price_yen", ""),
+            "new_price_yen": current_metadata.get("price_yen", ""),
+            "old_time_left": current_metadata.get("time_left", ""),
+            "new_time_left": current_metadata.get("time_left", ""),
+            "old_time_left_minutes": current_metadata.get("time_left_minutes", ""),
+            "new_time_left_minutes": current_metadata.get("time_left_minutes", ""),
+            "time_left_source": current_metadata.get("time_left_source", "unknown"),
+            "raw_time_left_text": current_metadata.get("raw_time_left_text", ""),
+            "suspicious_time_left": "False",
+            "cleared_suspicious_time_left": "False",
+            "old_auction_is_ended": current_metadata.get("auction_is_ended", ""),
+            "new_auction_is_ended": current_metadata.get("auction_is_ended", ""),
+            "old_current_price_yen": current_metadata.get("current_price_yen", ""),
+            "new_current_price_yen": current_metadata.get("current_price_yen", ""),
+            "old_buy_now_price_yen": current_metadata.get("buy_now_price_yen", ""),
+            "new_buy_now_price_yen": current_metadata.get("buy_now_price_yen", ""),
+            "old_bid_count": current_metadata.get("bid_count", ""),
+            "new_bid_count": current_metadata.get("bid_count", ""),
+            "updated": "False",
+            "skipped_by_cache": "False",
+            "error": "",
+        }
+
+        cache_entry = load_detail_enrichment_cache_entry(conn, url)
+        current_suspicious = is_suspicious_time_left(
+            current_metadata.get("time_left", ""),
+            current_metadata.get("time_left_minutes", ""),
+            current_metadata.get("time_left_source", ""),
+            current_metadata.get("raw_time_left_text", ""),
+        )
+        if current_suspicious:
+            stats["suspicious_detected"] += 1
+            log_entry["suspicious_time_left"] = "True"
+        if is_best_row:
+            if normalize_price_source(current_metadata.get("price_source", "")) == "zenmarket_detail":
+                best_already_zenmarket += 1
+            if should_retry_zenmarket_for_best_row(row, cache_entry, force_refresh or zenmarket_full_refresh):
+                best_retry_candidates += 1
+        if (
+            not force_refresh
+            and not zenmarket_full_refresh
+            and not current_suspicious
+            and can_skip_detail_refresh_from_cache(cache_entry, current_metadata.get("price_source", ""))
+        ):
+            stats["skipped_cache"] += 1
+            log_entry["skipped_by_cache"] = "True"
+            log_entry["error"] = str(cache_entry.get("error", "") or "")
+            log_entry["new_price_source"] = normalize_price_source(
+                str(cache_entry.get("price_source", "") or log_entry["new_price_source"])
+            )
+            log_entry["time_left_source"] = str(cache_entry.get("time_left_source", "") or log_entry["time_left_source"])
+            log_entry["raw_time_left_text"] = str(cache_entry.get("raw_time_left_text", "") or log_entry["raw_time_left_text"])
+            log_rows.append(log_entry)
+            continue
+
+        stats["attempted"] += 1
+        zenmarket_attempted = False
+        zenmarket_success = False
+        zenmarket_error = ""
+        zenmarket_retry_count = 0
+        zenmarket_attempts_for_item = 0
+        zenmarket_metadata: Dict[str, str] = {}
+        zenmarket_url = build_zenmarket_auction_url(url)
+        should_force_best_zenmarket = is_best_row and should_retry_zenmarket_for_best_row(
+            row,
+            cache_entry,
+            force_refresh or zenmarket_full_refresh,
+        )
+        should_try_zenmarket = bool(zenmarket_url) and (should_force_best_zenmarket or normalize_price_source(current_metadata.get("price_source", "")) != "zenmarket_detail")
+        if should_try_zenmarket:
+            zenmarket_attempted = True
+            zenmarket_metadata, zenmarket_url, zenmarket_success, zenmarket_error, zenmarket_retry_count, zenmarket_attempts_for_item = fetch_zenmarket_detail_with_retries(
+                session,
+                url,
+                max_retries=config.ZENMARKET_MAX_RETRIES_PER_ITEM,
+                deadline_monotonic=zenmarket_deadline,
+            )
+            stats["zenmarket_attempted"] += zenmarket_attempts_for_item
+            stats["zenmarket_retries"] += zenmarket_retry_count
+            if is_best_row:
+                stats["best_zenmarket_attempted"] += zenmarket_attempts_for_item
+            log_entry["zenmarket_url"] = zenmarket_url
+            log_entry["zenmarket_attempted"] = "True"
+            log_entry["zenmarket_success"] = "True" if zenmarket_success else "False"
+            log_entry["zenmarket_retry_count"] = str(zenmarket_retry_count)
+            log_entry["zenmarket_error"] = zenmarket_error
+            log_entry["zenmarket_retry_needed"] = "False" if zenmarket_success else "True"
+            if zenmarket_success:
+                stats["zenmarket_success"] += 1
+                if is_best_row:
+                    stats["best_zenmarket_success"] += 1
+                if zenmarket_metadata.get("current_price_yen") and zenmarket_metadata.get("current_price_yen") != current_metadata.get("current_price_yen", ""):
+                    stats["zenmarket_current_price_updated"] += 1
+                if zenmarket_metadata.get("buy_now_price_yen") and zenmarket_metadata.get("buy_now_price_yen") != current_metadata.get("buy_now_price_yen", ""):
+                    stats["zenmarket_buy_now_updated"] += 1
+            else:
+                stats["zenmarket_errors"] += 1
+                if is_best_row:
+                    stats["best_zenmarket_errors"] += 1
+                stats["zenmarket_fail_after_retries"] += 1
+
+        metadata = {}
+        detail_source = normalize_price_source(current_metadata.get("price_source", "yahoo_search")) or "yahoo_search"
+        yahoo_fallback_used = False
+        if zenmarket_success:
+            metadata = dict(zenmarket_metadata)
+            detail_source = "zenmarket_detail"
+        else:
+            reader_url = build_reader_url_from_target_url(url)
+            detail_markdown, fetch_error = fetch_reader_content_verbose(session, reader_url, f"detail page '{url}'")
+            if not detail_markdown:
+                stats["errors"] += 1
+                consecutive_errors += 1
+                log_entry["error"] = fetch_error or zenmarket_error or "empty_detail_response"
+                log_rows.append(log_entry)
+                upsert_detail_enrichment_cache(
+                    conn,
+                    url,
+                    current_metadata,
+                    success=False,
+                    zenmarket_attempted=zenmarket_attempted,
+                    zenmarket_success=zenmarket_success,
+                    zenmarket_error=zenmarket_error,
+                    error=log_entry["error"],
+                )
+                if consecutive_errors >= config.ZENMARKET_MAX_CONSECUTIVE_ERRORS:
+                    logging.warning(
+                        "Final deals detail double-check stopped after %s consecutive errors.",
+                        consecutive_errors,
+                    )
+                    break
+                if index < len(candidates):
+                    time.sleep(row_sleep_seconds)
+                continue
+
+            yahoo_fallback_used = True
+            stats["fallback_yahoo_used"] += 1
+            log_entry["fallback_used"] = "True"
+            metadata = extract_listing_metadata(
+                title=title,
+                context_text=detail_markdown,
+                price_yen=int(to_float(deal.get("price_yen", 0))),
+            )
+            metadata["time_left_source"] = "yahoo_detail"
+            if metadata.get("current_price_yen") or metadata.get("buy_now_price_yen"):
+                detail_source = "yahoo_detail"
+
+        if not is_meaningful_detail_metadata(metadata):
+            stats["errors"] += 1
+            consecutive_errors += 1
+            log_entry["error"] = zenmarket_error or "empty_detail_response"
+            log_rows.append(log_entry)
+            upsert_detail_enrichment_cache(
+                conn,
+                url,
+                current_metadata,
+                success=False,
+                zenmarket_attempted=zenmarket_attempted,
+                zenmarket_success=zenmarket_success,
+                zenmarket_error=zenmarket_error,
+                error=log_entry["error"],
+            )
+            if consecutive_errors >= config.ZENMARKET_MAX_CONSECUTIVE_ERRORS:
+                logging.warning(
+                    "Final deals detail double-check stopped after %s consecutive errors.",
+                    consecutive_errors,
+                )
+                break
+            if index < len(candidates):
+                time.sleep(row_sleep_seconds)
+            continue
+
+        consecutive_errors = 0
+        merged = merge_listing_metadata_dicts(current_metadata, metadata)
+        merged["price_source"] = detail_source
+        if not merged.get("time_left_source"):
+            merged["time_left_source"] = "zenmarket_detail" if detail_source == "zenmarket_detail" else "yahoo_detail" if yahoo_fallback_used else "unknown"
+        suspicious_after = is_suspicious_time_left(
+            merged.get("time_left", ""),
+            merged.get("time_left_minutes", ""),
+            merged.get("time_left_source", ""),
+            merged.get("raw_time_left_text", ""),
+        )
+        if suspicious_after:
+            stats["suspicious_detected"] += 1
+            log_entry["suspicious_time_left"] = "True"
+            merged = clear_time_left_fields(merged, source="unknown")
+            merged["raw_time_left_text"] = ""
+            suspicious_after = False
+            stats["suspicious_cleared"] += 1
+            log_entry["cleared_suspicious_time_left"] = "True"
+        merged["price_yen"] = str(
+            select_primary_purchase_price(
+                listing_type=row.get("listing_type", LISTING_TYPE_UNKNOWN),
+                base_price_yen=int(to_float(current_metadata.get("price_yen", 0))),
+                current_price_yen=parse_optional_int(merged.get("current_price_yen", "")),
+                buy_now_price_yen=parse_optional_int(merged.get("buy_now_price_yen", "")),
+            )
+        )
+        changed = any(str(current_metadata.get(key, "")) != str(merged.get(key, "")) for key in current_metadata)
+
+        if changed:
+            deal.update(merged)
+            persist_listing_metadata(conn, str(deal.get("listing_id", "")), merged)
+            stats["updated"] += 1
+            time_changed = (
+                current_metadata.get("time_left", "") != merged.get("time_left", "")
+                or current_metadata.get("time_left_minutes", "") != merged.get("time_left_minutes", "")
+            )
+            price_changed = (
+                current_metadata.get("price_yen", "") != merged.get("price_yen", "")
+                or current_metadata.get("price_source", "") != merged.get("price_source", "")
+                or
+                current_metadata.get("current_price_yen", "") != merged.get("current_price_yen", "")
+                or current_metadata.get("buy_now_price_yen", "") != merged.get("buy_now_price_yen", "")
+            )
+            bid_changed = current_metadata.get("bid_count", "") != merged.get("bid_count", "")
+            ended_changed = (
+                current_metadata.get("auction_is_ended", "False") != "True"
+                and merged.get("auction_is_ended", "False") == "True"
+            )
+            if time_changed:
+                stats["time_updated"] += 1
+            if price_changed:
+                stats["price_updated"] += 1
+            if bid_changed:
+                stats["bid_updated"] += 1
+            if ended_changed:
+                stats["ended_detected"] += 1
+            if merged.get("price_source") == "zenmarket_detail":
+                stats["price_source_zenmarket_detail"] += 1
+            elif merged.get("price_source") == "yahoo_detail":
+                stats["price_source_yahoo_detail"] += 1
+            elif merged.get("price_source") == "yahoo_search":
+                stats["price_source_yahoo_search"] += 1
+
+        log_entry.update(
+            {
+                "new_price_yen": merged.get("price_yen", ""),
+                "new_time_left": merged.get("time_left", ""),
+                "new_time_left_minutes": merged.get("time_left_minutes", ""),
+                "time_left_source": merged.get("time_left_source", ""),
+                "raw_time_left_text": merged.get("raw_time_left_text", ""),
+                "new_auction_is_ended": merged.get("auction_is_ended", ""),
+                "new_current_price_yen": merged.get("current_price_yen", ""),
+                "new_buy_now_price_yen": merged.get("buy_now_price_yen", ""),
+                "new_bid_count": merged.get("bid_count", ""),
+                "new_price_source": merged.get("price_source", detail_source),
+                "updated": "True" if changed else "False",
+            }
+        )
+        log_rows.append(log_entry)
+        upsert_detail_enrichment_cache(
+            conn,
+            url,
+            merged,
+            success=True,
+            zenmarket_attempted=zenmarket_attempted,
+            zenmarket_success=zenmarket_success,
+            zenmarket_error=zenmarket_error,
+            error="",
+        )
+
+        if index < len(candidates):
+            time.sleep(row_sleep_seconds)
+
+    stats["best_already_zenmarket"] = best_already_zenmarket
+    stats["best_to_retry_zenmarket"] = best_retry_candidates
+    stats["zenmarket_duration_seconds"] = int(time.monotonic() - zenmarket_run_started_at)
+
+    refreshed_rows = [
+        build_sheet_row(
+            deal,
+            conn=conn,
+            existing_sheet_values=existing_sheet_data.get(str(deal.get("url", "")).strip(), {}),
+        )
+        for deal in deals
+    ]
+    refreshed_best_rows = sort_best_deals_rows(refreshed_rows)
+    refreshed_best_by_url = {str(row.get("url", "")).strip(): row for row in refreshed_best_rows}
+    best_non_zenmarket_after_run = sum(
+        1
+        for url in best_urls_in_candidates
+        if normalize_price_source(refreshed_best_by_url.get(url, {}).get("price_source", "")) != "zenmarket_detail"
+    )
+    stats["best_non_zenmarket_after_run"] = best_non_zenmarket_after_run
+
+    append_detail_enrichment_log(log_rows)
+    if stats["candidates"]:
+        logging.info(
+            "Double-check annonces finales: candidats=%s | pages_tentees=%s | pages_mises_a_jour=%s | skipped_cache=%s | erreurs=%s | ended_via_detail=%s | time_updates=%s | price_updates=%s | bid_updates=%s",
+            stats["candidates"],
+            stats["attempted"],
+            stats["updated"],
+            stats["skipped_cache"],
+            stats["errors"],
+            stats["ended_detected"],
+            stats["time_updated"],
+            stats["price_updated"],
+            stats["bid_updated"],
+        )
+        logging.info(
+            "ZenMarket double-check: tentatives=%s | succes=%s | erreurs=%s | prix_actuel_updates=%s | achat_immediat_updates=%s | bid_count_updates=%s | fallback_yahoo=%s | price_source zenmarket_detail=%s | price_source yahoo_detail=%s | price_source yahoo_search=%s",
+            stats["zenmarket_attempted"],
+            stats["zenmarket_success"],
+            stats["zenmarket_errors"],
+            stats["zenmarket_current_price_updated"],
+            stats["zenmarket_buy_now_updated"],
+            stats["bid_updated"],
+            stats["fallback_yahoo_used"],
+            stats["price_source_zenmarket_detail"],
+            stats["price_source_yahoo_detail"],
+            stats["price_source_yahoo_search"],
+        )
+        logging.info(
+            "ZenMarket Opportunités: candidates=%s | deja Détail ZenMarket=%s | a retenter ZenMarket=%s | tentatives ZenMarket=%s | succes ZenMarket=%s | retries effectues=%s | echecs apres retries=%s | fallback Yahoo utilise=%s | encore non ZenMarket apres run=%s | duree enrichissement ZenMarket=%ss",
+            len(best_rows_all),
+            stats["best_already_zenmarket"],
+            stats["best_to_retry_zenmarket"],
+            stats["best_zenmarket_attempted"],
+            stats["best_zenmarket_success"],
+            stats["zenmarket_retries"],
+            stats["zenmarket_fail_after_retries"],
+            stats["fallback_yahoo_used"],
+            stats["best_non_zenmarket_after_run"],
+            stats["zenmarket_duration_seconds"],
+        )
+    return stats
 
 
 def determine_candidate_metadata(keyword_candidate: str, example_title: str = "") -> Tuple[str, str, str]:
@@ -2886,10 +5001,33 @@ def summarize_sheet_views(
         for deal in deals
     ]
     return {
-        GOOGLE_BUY_NOW_WORKSHEET_NAME: len(sort_buy_now_deals_rows(rows)),
-        GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME: len(sort_auctions_watch_rows(rows)),
         GOOGLE_NEEDS_PRICE_WORKSHEET_NAME: len(sort_needs_price_rows(rows)),
+        GOOGLE_BEST_WORKSHEET_NAME: len(sort_best_deals_rows(rows)),
+        GOOGLE_DEALS_WORKSHEET_NAME: len(sort_deals_rows(rows, prefer_buy_now=bool(config.PREFER_BUY_NOW))),
     }
+
+
+def summarize_auction_time_windows(rows: List[Dict[str, str]]) -> Dict[str, int]:
+    counts = {"ended": 0, "active_known": 0, "active_unknown": 0, "lt_1h": 0, "lt_3h": 0}
+    for row in rows:
+        if row.get("listing_type") not in (LISTING_TYPE_AUCTION, LISTING_TYPE_LOW_START_AUCTION):
+            continue
+        if is_row_auction_ended(row):
+            counts["ended"] += 1
+            continue
+        minutes_raw = row.get("time_left_minutes", "")
+        if minutes_raw in ("", None):
+            counts["active_unknown"] += 1
+            continue
+        minutes = int(to_float(minutes_raw))
+        if minutes <= 0:
+            continue
+        counts["active_known"] += 1
+        if minutes <= 60:
+            counts["lt_1h"] += 1
+        if minutes <= 180:
+            counts["lt_3h"] += 1
+    return counts
 
 
 def _get_or_create_worksheet(spreadsheet: object, worksheet_name: str) -> object:
@@ -2902,17 +5040,161 @@ def _get_or_create_worksheet(spreadsheet: object, worksheet_name: str) -> object
     return spreadsheet.add_worksheet(title=worksheet_name, rows=2000, cols=80)
 
 
-def _read_existing_sheet_rows(worksheet: object, headers: List[str]) -> Dict[str, Dict[str, str]]:
+def _get_existing_worksheet(spreadsheet: object, worksheet_name: str) -> Optional[object]:
+    try:
+        return spreadsheet.worksheet(worksheet_name)
+    except Exception:
+        return None
+
+
+def _get_existing_worksheet_from_candidates(spreadsheet: object, worksheet_names: Sequence[str]) -> Optional[object]:
+    for worksheet_name in worksheet_names:
+        worksheet = _get_existing_worksheet(spreadsheet, worksheet_name)
+        if worksheet is not None:
+            return worksheet
+    return None
+
+
+def _rename_worksheet_if_needed(spreadsheet: object, old_name: str, new_name: str) -> bool:
+    old_ws = _get_existing_worksheet(spreadsheet, old_name)
+    if old_ws is None or old_name == new_name:
+        return False
+    if _get_existing_worksheet(spreadsheet, new_name) is not None:
+        return False
+    try:
+        old_ws.update_title(new_name)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Could not rename worksheet '%s' -> '%s': %s", old_name, new_name, exc)
+        return False
+
+
+def _migrate_google_worksheet_names(spreadsheet: object) -> Dict[str, bool]:
+    results: Dict[str, bool] = {}
+    for old_name, new_name in GOOGLE_SHEET_MIGRATIONS:
+        results[f"{old_name}->{new_name}"] = _rename_worksheet_if_needed(spreadsheet, old_name, new_name)
+    return results
+
+
+def _sync_mode_emploi_worksheet(spreadsheet: object) -> bool:
+    worksheet = _get_or_create_worksheet(spreadsheet, GOOGLE_MODE_EMPLOI_WORKSHEET_NAME)
+    payload = [
+        ["Mode d’emploi"],
+        ["Opportunités"],
+        ["Onglet principal à regarder pour décider quoi acheter."],
+        ["Pas de saisie manuelle de prix ici."],
+        ["Regarder surtout Prix Japon ¥, Prix actuel ¥, Prix achat immédiat ¥, Coût total estimé €, Prix marché €, Marge estimée € et ROI %."],
+        ["Toutes les lignes doivent idéalement avoir Source prix achat = Détail ZenMarket quand possible."],
+        [""],
+        ["Prix à remplir"],
+        ["Onglet où remplir les prix de revente manuels."],
+        ["Utiliser les liens Cardmarket / eBay vendu / PriceCharting pour renseigner le prix de revente."],
+        ["Le bot recalcule ensuite automatiquement le ROI et la marge."],
+        [""],
+        ["Historique"],
+        ["Historique complet / debug, utile pour contrôler les annonces ignorées ou déjà terminées."],
+        [""],
+        ["Définitions utiles"],
+        ["Prix Japon ¥ = prix utilisé pour calculer le coût."],
+        ["Prix actuel ¥ = prix actuel de l’enchère."],
+        ["Prix achat immédiat ¥ = achat direct si disponible."],
+        ["Source prix achat = source du prix d’achat, idéalement Détail ZenMarket."],
+        ["Prix revente manuel € = prix que vous renseignez vous-même."],
+        ["Prix marché € = prix utilisé pour calculer la rentabilité."],
+        ["Marge estimée € = gain estimé après coût."],
+        ["ROI % = rentabilité estimée."],
+        ["Notes = zone libre utilisateur."],
+        [""],
+        ["Les seules colonnes à modifier manuellement sont dans Prix à remplir"],
+        ["Prix revente manuel €"],
+        ["Notes"],
+        [""],
+        ["Ne pas modifier les colonnes non jaunes."],
+    ]
+    worksheet.clear()
+    worksheet.update(range_name="A1", values=payload, value_input_option="RAW")
+    worksheet_id = getattr(worksheet, "id", None)
+    if worksheet_id is not None:
+        spreadsheet.batch_update(
+            {
+                "requests": build_base_sheet_format_requests(
+                    worksheet_id=worksheet_id,
+                    header_count=1,
+                    row_count=max(0, len(payload) - 1),
+                )
+                + [
+                    {
+                        "autoResizeDimensions": {
+                            "dimensions": {
+                                "sheetId": worksheet_id,
+                                "dimension": "COLUMNS",
+                                "startIndex": 0,
+                                "endIndex": 1,
+                            }
+                        }
+                    }
+                ]
+            }
+        )
+    return True
+
+
+def _cleanup_inactive_google_worksheets(spreadsheet: object) -> Dict[str, bool]:
+    results: Dict[str, bool] = {}
+    inactive_names = [
+        GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME,
+        GOOGLE_BUY_NOW_WORKSHEET_NAME,
+        GOOGLE_LEGACY_BEST_WORKSHEET_NAME,
+        GOOGLE_LEGACY_NEEDS_PRICE_WORKSHEET_NAME,
+        GOOGLE_LEGACY_DEALS_WORKSHEET_NAME,
+    ]
+    active_names = {
+        GOOGLE_MODE_EMPLOI_WORKSHEET_NAME,
+        GOOGLE_BEST_WORKSHEET_NAME,
+        GOOGLE_NEEDS_PRICE_WORKSHEET_NAME,
+        GOOGLE_DEALS_WORKSHEET_NAME,
+    }
+    for worksheet_name in inactive_names:
+        if worksheet_name in active_names:
+            continue
+        worksheet = _get_existing_worksheet(spreadsheet, worksheet_name)
+        if worksheet is None:
+            results[worksheet_name] = False
+            continue
+        try:
+            spreadsheet.del_worksheet(worksheet)
+            results[worksheet_name] = False
+            continue
+        except Exception:
+            try:
+                worksheet.clear()
+                worksheet.update(
+                    range_name="A1",
+                    values=[["Onglet désactivé — utiliser Opportunités"]],
+                    value_input_option="RAW",
+                )
+                results[worksheet_name] = True
+            except Exception:
+                results[worksheet_name] = True
+    return results
+
+
+def _read_existing_sheet_rows(
+    worksheet: object,
+    headers: List[str],
+    extra_headers: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, str]]:
     existing_values = worksheet.get_all_values()
     existing_by_url: Dict[str, Dict[str, str]] = {}
     if not existing_values:
         return existing_by_url
 
+    all_headers = list(dict.fromkeys(list(headers) + list(extra_headers or [])))
     existing_headers = [get_internal_header_name(header) for header in existing_values[0]]
     header_index = {h: i for i, h in enumerate(existing_headers)}
     for row in existing_values[1:]:
         row_dict: Dict[str, str] = {}
-        for col_name in headers:
+        for col_name in all_headers:
             idx = header_index.get(col_name)
             raw_value = row[idx] if idx is not None and idx < len(row) else ""
             row_dict[col_name] = parse_visible_value(col_name, raw_value)
@@ -2947,21 +5229,30 @@ def load_google_sheet_existing_values() -> Dict[str, Dict[str, str]]:
         return {}
 
     try:
-        deals_ws = _get_or_create_worksheet(spreadsheet, GOOGLE_DEALS_WORKSHEET_NAME)
-        best_ws = _get_or_create_worksheet(spreadsheet, GOOGLE_BEST_WORKSHEET_NAME)
-        buy_now_ws = _get_or_create_worksheet(spreadsheet, GOOGLE_BUY_NOW_WORKSHEET_NAME)
-        auctions_ws = _get_or_create_worksheet(spreadsheet, GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME)
-        needs_price_ws = _get_or_create_worksheet(spreadsheet, GOOGLE_NEEDS_PRICE_WORKSHEET_NAME)
-        deals_existing = _read_existing_sheet_rows(deals_ws, GOOGLE_DEALS_HEADERS)
-        best_existing = _read_existing_sheet_rows(best_ws, GOOGLE_BEST_DEALS_HEADERS)
-        buy_now_existing = _read_existing_sheet_rows(buy_now_ws, GOOGLE_BUY_NOW_DEALS_HEADERS)
-        auctions_existing = _read_existing_sheet_rows(auctions_ws, GOOGLE_AUCTIONS_WATCH_HEADERS)
-        needs_price_existing = _read_existing_sheet_rows(needs_price_ws, GOOGLE_NEEDS_PRICE_HEADERS)
+        legacy_manual_headers = ["manual_market_price_eur", "manual_price_source", "manual_price_confidence", "manual_status", "notes"]
+        deals_sources = []
+        best_sources = []
+        needs_price_sources = []
+
+        for worksheet_name in (GOOGLE_DEALS_WORKSHEET_NAME, GOOGLE_LEGACY_DEALS_WORKSHEET_NAME):
+            worksheet = _get_existing_worksheet(spreadsheet, worksheet_name)
+            if worksheet is not None:
+                deals_sources.append(_read_existing_sheet_rows(worksheet, GOOGLE_DEALS_HEADERS, extra_headers=legacy_manual_headers))
+        for worksheet_name in (GOOGLE_BEST_WORKSHEET_NAME, GOOGLE_LEGACY_BEST_WORKSHEET_NAME):
+            worksheet = _get_existing_worksheet(spreadsheet, worksheet_name)
+            if worksheet is not None:
+                best_sources.append(_read_existing_sheet_rows(worksheet, GOOGLE_BEST_DEALS_HEADERS, extra_headers=legacy_manual_headers))
+        for worksheet_name in (GOOGLE_NEEDS_PRICE_WORKSHEET_NAME, GOOGLE_LEGACY_NEEDS_PRICE_WORKSHEET_NAME):
+            worksheet = _get_existing_worksheet(spreadsheet, worksheet_name)
+            if worksheet is not None:
+                needs_price_sources.append(_read_existing_sheet_rows(worksheet, GOOGLE_NEEDS_PRICE_HEADERS, extra_headers=legacy_manual_headers))
+
+        deals_existing = merge_manual_values_by_priority(*deals_sources)
+        best_existing = merge_manual_values_by_priority(*best_sources)
+        needs_price_existing = merge_manual_values_by_priority(*needs_price_sources)
         return merge_manual_values_by_priority(
             needs_price_existing,
             best_existing,
-            buy_now_existing,
-            auctions_existing,
             deals_existing,
         )
     except Exception as exc:  # noqa: BLE001
@@ -2977,7 +5268,11 @@ def _sync_single_google_worksheet(
 ) -> int:
     worksheet = _get_or_create_worksheet(spreadsheet, worksheet_name)
     pre_existing_values = worksheet.get_all_values()
-    existing_by_url = _read_existing_sheet_rows(worksheet, headers)
+    existing_by_url = _read_existing_sheet_rows(
+        worksheet,
+        headers,
+        extra_headers=["manual_market_price_eur", "manual_price_source", "manual_price_confidence", "manual_status", "notes"],
+    )
 
     merged_by_url: Dict[str, Dict[str, str]] = {}
     for url, row in existing_by_url.items():
@@ -3073,11 +5368,11 @@ def export_to_google_sheets(
         prefer_buy_now=bool(config.PREFER_BUY_NOW),
     )
     best_rows = sort_best_deals_rows(sheet_rows)
-    buy_now_rows = sort_buy_now_deals_rows(sheet_rows)
-    auctions_watch_rows = sort_auctions_watch_rows(sheet_rows)
     needs_price_rows = sort_needs_price_rows(sheet_rows)
 
     try:
+        migration_results = _migrate_google_worksheet_names(spreadsheet)
+        mode_emploi_exists = _sync_mode_emploi_worksheet(spreadsheet)
         deals_count = _sync_single_google_worksheet(
             spreadsheet=spreadsheet,
             worksheet_name=GOOGLE_DEALS_WORKSHEET_NAME,
@@ -3090,36 +5385,36 @@ def export_to_google_sheets(
             headers=GOOGLE_BEST_DEALS_HEADERS,
             rows=best_rows,
         )
-        buy_now_count = _sync_single_google_worksheet(
-            spreadsheet=spreadsheet,
-            worksheet_name=GOOGLE_BUY_NOW_WORKSHEET_NAME,
-            headers=GOOGLE_BUY_NOW_DEALS_HEADERS,
-            rows=buy_now_rows,
-        )
-        auctions_count = _sync_single_google_worksheet(
-            spreadsheet=spreadsheet,
-            worksheet_name=GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME,
-            headers=GOOGLE_AUCTIONS_WATCH_HEADERS,
-            rows=auctions_watch_rows,
-        )
         needs_price_count = _sync_single_google_worksheet(
             spreadsheet=spreadsheet,
             worksheet_name=GOOGLE_NEEDS_PRICE_WORKSHEET_NAME,
             headers=GOOGLE_NEEDS_PRICE_HEADERS,
             rows=needs_price_rows,
         )
+        obsolete_results = _cleanup_inactive_google_worksheets(spreadsheet)
     except Exception as exc:  # noqa: BLE001
         logging.error("Google worksheet write failed: %s", exc)
         return {}
 
     return {
         "counts": {
+            GOOGLE_MODE_EMPLOI_WORKSHEET_NAME: 1 if mode_emploi_exists else 0,
             GOOGLE_DEALS_WORKSHEET_NAME: deals_count,
             GOOGLE_BEST_WORKSHEET_NAME: best_count,
-            GOOGLE_BUY_NOW_WORKSHEET_NAME: buy_now_count,
-            GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME: auctions_count,
             GOOGLE_NEEDS_PRICE_WORKSHEET_NAME: needs_price_count,
         },
+        "worksheets": {
+            GOOGLE_MODE_EMPLOI_WORKSHEET_NAME: mode_emploi_exists,
+            GOOGLE_DEALS_WORKSHEET_NAME: True,
+            GOOGLE_BEST_WORKSHEET_NAME: True,
+            GOOGLE_NEEDS_PRICE_WORKSHEET_NAME: True,
+            GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME: obsolete_results.get(GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME, False),
+            GOOGLE_BUY_NOW_WORKSHEET_NAME: obsolete_results.get(GOOGLE_BUY_NOW_WORKSHEET_NAME, False),
+            GOOGLE_LEGACY_DEALS_WORKSHEET_NAME: obsolete_results.get(GOOGLE_LEGACY_DEALS_WORKSHEET_NAME, False),
+            GOOGLE_LEGACY_BEST_WORKSHEET_NAME: obsolete_results.get(GOOGLE_LEGACY_BEST_WORKSHEET_NAME, False),
+            GOOGLE_LEGACY_NEEDS_PRICE_WORKSHEET_NAME: obsolete_results.get(GOOGLE_LEGACY_NEEDS_PRICE_WORKSHEET_NAME, False),
+        },
+        "migrations": migration_results,
         "sheet_name": config.GOOGLE_SHEET_NAME,
         "sheet_url": getattr(spreadsheet, "url", ""),
     }
@@ -3165,7 +5460,7 @@ def send_telegram_alerts(deals: List[ScoredDeal]) -> int:
     return sent
 
 
-def main(best_only: bool = False) -> None:
+def main(best_only: bool = False, force_detail_refresh: bool = False, zenmarket_full_refresh: bool = False) -> None:
     setup_logging()
     logging.info("Starting pokemon-watch-bot in watch-only mode (no auto-buy).")
 
@@ -3229,19 +5524,88 @@ def main(best_only: bool = False) -> None:
                     scored.title,
                 )
                 new_deals.append(scored)
+            else:
+                refresh_existing_deal(conn, scored)
 
         if index < len(rules):
             time.sleep(config.REQUEST_SLEEP_BETWEEN_QUERIES_SECONDS)
 
     all_deals = fetch_all_deals(conn)
     existing_sheet_data = load_google_sheet_existing_values()
+    detail_check_stats = double_check_final_deals_details(
+        session=session,
+        conn=conn,
+        deals=all_deals,
+        existing_sheet_data=existing_sheet_data,
+        force_refresh=force_detail_refresh or zenmarket_full_refresh,
+        zenmarket_full_refresh=zenmarket_full_refresh,
+    )
+    all_deals = fetch_all_deals(conn)
     csv_rows = export_csv(all_deals, config.CSV_EXPORT_PATH, conn=conn, existing_sheet_data=existing_sheet_data)
     gs_result = export_to_google_sheets(all_deals, conn=conn, existing_sheet_data=existing_sheet_data)
 
-    current_run_deals = [deal.__dict__.copy() for deal in all_eligible_this_run]
+    current_run_listing_ids = {deal.listing_id for deal in all_eligible_this_run}
+    current_run_deals = [deal for deal in all_deals if str(deal.get("listing_id", "")) in current_run_listing_ids]
     summary_counts = summarize_decisions(current_run_deals, conn=conn, existing_sheet_data=existing_sheet_data)
     listing_type_counts = summarize_listing_types(current_run_deals, conn=conn, existing_sheet_data=existing_sheet_data)
     sheet_view_counts = summarize_sheet_views(current_run_deals, conn=conn, existing_sheet_data=existing_sheet_data)
+    current_run_rows = [
+        build_sheet_row(
+            deal,
+            conn=conn,
+            existing_sheet_values=(existing_sheet_data or {}).get(str(deal.get("url", "")).strip(), {}),
+        )
+        for deal in current_run_deals
+    ]
+    auction_time_counts = summarize_auction_time_windows(current_run_rows)
+    all_sheet_rows = [
+        build_sheet_row(
+            deal,
+            conn=conn,
+            existing_sheet_values=(existing_sheet_data or {}).get(str(deal.get("url", "")).strip(), {}),
+        )
+        for deal in all_deals
+    ]
+    best_rows_all = sort_best_deals_rows(all_sheet_rows)
+    detail_check_stats["best_lines_total"] = len(best_rows_all)
+    detail_check_stats["best_lines_buy_now_price"] = sum(1 for row in best_rows_all if to_float(row.get("buy_now_price_yen", "")) > 0)
+    detail_check_stats["best_lines_auction_plus_buy_now"] = sum(
+        1
+        for row in best_rows_all
+        if to_float(row.get("current_price_yen", "")) > 0 and to_float(row.get("buy_now_price_yen", "")) > 0
+    )
+    detail_check_stats["best_lines_time_9_days"] = sum(
+        1 for row in best_rows_all if normalize_numeric_text(row.get("time_left", "")).casefold() in {"9 jours", "9 days", "9 day"}
+    )
+    detail_check_stats["best_lines_minutes_12960"] = sum(
+        1 for row in best_rows_all if parse_optional_int(row.get("time_left_minutes", "")) == 12960
+    )
+    detail_check_stats["price_source_zenmarket_detail"] = sum(
+        1 for row in best_rows_all if normalize_price_source(row.get("price_source", "") or "") == "zenmarket_detail"
+    )
+    detail_check_stats["price_source_yahoo_detail"] = sum(
+        1 for row in best_rows_all if normalize_price_source(row.get("price_source", "") or "") == "yahoo_detail"
+    )
+    detail_check_stats["price_source_yahoo_search"] = sum(
+        1 for row in best_rows_all if normalize_price_source(row.get("price_source", "") or "") == "yahoo_search"
+    )
+    detail_check_stats["price_source_sqlite_cache"] = sum(
+        1 for row in best_rows_all if normalize_price_source(row.get("price_source", "") or "") == "sqlite_cache"
+    )
+    detail_check_stats["price_source_unknown"] = sum(
+        1
+        for row in best_rows_all
+        if normalize_price_source(row.get("price_source", "") or "")
+        not in {"zenmarket_detail", "yahoo_detail", "yahoo_search", "sqlite_cache"}
+    )
+    detail_check_stats["best_without_zenmarket_link"] = sum(
+        1 for row in best_rows_all if not str(row.get("link_for_zenmarket", "") or "").strip()
+    )
+    detail_check_stats["best_time_source_zenmarket"] = sum(1 for row in best_rows_all if row.get("time_left_source") == "zenmarket_detail")
+    detail_check_stats["best_time_source_yahoo"] = sum(1 for row in best_rows_all if row.get("time_left_source") == "yahoo_detail")
+    detail_check_stats["best_time_source_unknown"] = sum(
+        1 for row in best_rows_all if row.get("time_left_source", "") not in {"zenmarket_detail", "yahoo_detail"}
+    )
 
     if best_only:
         show_best_in_terminal(all_deals, conn=conn, existing_sheet_data=existing_sheet_data)
@@ -3257,14 +5621,26 @@ def main(best_only: bool = False) -> None:
     logging.info("CSV exported rows: %s (%s)", csv_rows, config.CSV_EXPORT_PATH)
     if config.GOOGLE_SHEETS_ENABLED:
         gs_counts = gs_result.get("counts", {}) if isinstance(gs_result, dict) else {}
+        gs_worksheets = gs_result.get("worksheets", {}) if isinstance(gs_result, dict) else {}
         logging.info(
-            "Google Sheets synced rows: Deals=%s | Best Deals=%s | Buy Now Deals=%s | Auctions Watch=%s | Needs Price=%s (%s)",
+            "Google Sheets synced rows: Mode d’emploi=%s | Historique=%s | Opportunités=%s | Prix à remplir=%s (%s)",
+            gs_counts.get(GOOGLE_MODE_EMPLOI_WORKSHEET_NAME, 0),
             gs_counts.get(GOOGLE_DEALS_WORKSHEET_NAME, 0),
             gs_counts.get(GOOGLE_BEST_WORKSHEET_NAME, 0),
-            gs_counts.get(GOOGLE_BUY_NOW_WORKSHEET_NAME, 0),
-            gs_counts.get(GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME, 0),
             gs_counts.get(GOOGLE_NEEDS_PRICE_WORKSHEET_NAME, 0),
             gs_result.get("sheet_name", config.GOOGLE_SHEET_NAME) if isinstance(gs_result, dict) else config.GOOGLE_SHEET_NAME,
+        )
+        logging.info(
+            "Google Sheets onglets: Mode d’emploi=%s | Opportunités=%s | Prix à remplir=%s | Historique=%s | Best Deals actif=%s | Needs Price actif=%s | Deals actif=%s | Auctions Watch présent=%s | Buy Now Deals présent=%s",
+            gs_worksheets.get(GOOGLE_MODE_EMPLOI_WORKSHEET_NAME, False),
+            gs_worksheets.get(GOOGLE_BEST_WORKSHEET_NAME, False),
+            gs_worksheets.get(GOOGLE_NEEDS_PRICE_WORKSHEET_NAME, False),
+            gs_worksheets.get(GOOGLE_DEALS_WORKSHEET_NAME, False),
+            gs_worksheets.get(GOOGLE_LEGACY_BEST_WORKSHEET_NAME, False),
+            gs_worksheets.get(GOOGLE_LEGACY_NEEDS_PRICE_WORKSHEET_NAME, False),
+            gs_worksheets.get(GOOGLE_LEGACY_DEALS_WORKSHEET_NAME, False),
+            gs_worksheets.get(GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME, False),
+            gs_worksheets.get(GOOGLE_BUY_NOW_WORKSHEET_NAME, False),
         )
     else:
         logging.info("Google Sheets export disabled.")
@@ -3293,10 +5669,57 @@ def main(best_only: bool = False) -> None:
         listing_type_counts.get(LISTING_TYPE_UNKNOWN, 0),
     )
     logging.info(
-        "Views: Buy Now Deals=%s | Auctions Watch=%s | Needs Price=%s",
-        sheet_view_counts.get(GOOGLE_BUY_NOW_WORKSHEET_NAME, 0),
-        sheet_view_counts.get(GOOGLE_AUCTIONS_WATCH_WORKSHEET_NAME, 0),
+        "Views: Opportunités=%s | Prix à remplir=%s | Historique=%s",
+        sheet_view_counts.get(GOOGLE_BEST_WORKSHEET_NAME, 0),
         sheet_view_counts.get(GOOGLE_NEEDS_PRICE_WORKSHEET_NAME, 0),
+        sheet_view_counts.get(GOOGLE_DEALS_WORKSHEET_NAME, 0),
+    )
+    logging.info(
+        "Enchères terminées détectées : %s | Enchères actives avec temps connu : %s | Enchères actives temps inconnu : %s | Enchères fin < 1h : %s | Enchères fin < 3h : %s",
+        auction_time_counts.get("ended", 0),
+        auction_time_counts.get("active_known", 0),
+        auction_time_counts.get("active_unknown", 0),
+        auction_time_counts.get("lt_1h", 0),
+        auction_time_counts.get("lt_3h", 0),
+    )
+    logging.info(
+        "Double-check annonces finales : candidats=%s | pages tentées=%s | pages mises à jour=%s | skipped cache=%s | erreurs=%s | enchères terminées via détail=%s | temps restant mis à jour=%s | prix mis à jour=%s | enchères count mis à jour=%s",
+        detail_check_stats.get("candidates", 0),
+        detail_check_stats.get("attempted", 0),
+        detail_check_stats.get("updated", 0),
+        detail_check_stats.get("skipped_cache", 0),
+        detail_check_stats.get("errors", 0),
+        detail_check_stats.get("ended_detected", 0),
+        detail_check_stats.get("time_updated", 0),
+        detail_check_stats.get("price_updated", 0),
+        detail_check_stats.get("bid_updated", 0),
+    )
+    logging.info(
+        "Opportunités : lignes=%s | avec prix achat immédiat=%s | enchère+achat immédiat=%s | temps=9 jours=%s | minutes=12960=%s | temps suspects détectés=%s | temps suspects effacés=%s | source prix achat ZenMarket=%s | source temps ZenMarket=%s | source temps Yahoo=%s | source temps inconnue=%s",
+        detail_check_stats.get("best_lines_total", 0),
+        detail_check_stats.get("best_lines_buy_now_price", 0),
+        detail_check_stats.get("best_lines_auction_plus_buy_now", 0),
+        detail_check_stats.get("best_lines_time_9_days", 0),
+        detail_check_stats.get("best_lines_minutes_12960", 0),
+        detail_check_stats.get("suspicious_detected", 0),
+        detail_check_stats.get("suspicious_cleared", 0),
+        detail_check_stats.get("price_source_zenmarket_detail", 0),
+        detail_check_stats.get("best_time_source_zenmarket", 0),
+        detail_check_stats.get("best_time_source_yahoo", 0),
+        detail_check_stats.get("best_time_source_unknown", 0),
+    )
+    logging.info(
+        "Opportunités source prix achat : total Opportunités=%s | Détail ZenMarket=%s | Détail Yahoo=%s | Résultat Yahoo=%s | Cache SQLite=%s | Unknown=%s | Opportunités sans lien ZenMarket=%s | Opportunités ZenMarket tentées=%s | Opportunités ZenMarket succès=%s | Opportunités ZenMarket erreurs=%s",
+        detail_check_stats.get("best_lines_total", 0),
+        detail_check_stats.get("price_source_zenmarket_detail", 0),
+        detail_check_stats.get("price_source_yahoo_detail", 0),
+        detail_check_stats.get("price_source_yahoo_search", 0),
+        detail_check_stats.get("price_source_sqlite_cache", 0),
+        detail_check_stats.get("price_source_unknown", 0),
+        detail_check_stats.get("best_without_zenmarket_link", 0),
+        detail_check_stats.get("best_zenmarket_attempted", 0),
+        detail_check_stats.get("best_zenmarket_success", 0),
+        detail_check_stats.get("best_zenmarket_errors", 0),
     )
     logging.info("Telegram alerts sent: %s", telegram_sent)
 
@@ -3308,4 +5731,8 @@ if __name__ == "__main__":
     elif cli_args.auto_price_test:
         run_auto_price_test()
     else:
-        main(best_only=cli_args.best)
+        main(
+            best_only=cli_args.best,
+            force_detail_refresh=cli_args.force_detail_refresh,
+            zenmarket_full_refresh=cli_args.zenmarket_full_refresh,
+        )

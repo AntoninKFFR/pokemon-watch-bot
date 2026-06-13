@@ -23,6 +23,24 @@ REQUEST_TIMEOUT_SECONDS = 30
 REQUEST_RETRIES = 2
 REQUEST_SLEEP_BETWEEN_QUERIES_SECONDS = 2.0
 MAX_RESULTS_PER_RULE = 50
+MAX_DETAIL_PAGES_PER_RUN = 20
+DETAIL_ENRICHMENT_ENABLED = True
+FINAL_DEALS_DOUBLE_CHECK_ENABLED = True
+FINAL_DEALS_DOUBLE_CHECK_MAX_PAGES = 150
+FINAL_DEALS_DOUBLE_CHECK_SLEEP_SECONDS = 1.2
+FINAL_DEALS_DOUBLE_CHECK_CACHE_HOURS = 3
+FINAL_DEALS_DOUBLE_CHECK_MAX_CONSECUTIVE_ERRORS = 5
+BEST_DEALS_ZENMARKET_REFRESH_ENABLED = True
+BEST_DEALS_ZENMARKET_REFRESH_MAX_PAGES = 200
+BEST_DEALS_ZENMARKET_REFRESH_SLEEP_SECONDS = 1.0
+ZENMARKET_REQUIRED_FOR_BEST_DEALS = True
+ZENMARKET_MAX_RETRIES_PER_ITEM = 3
+ZENMARKET_TIMEOUT_SECONDS = 30
+ZENMARKET_SLEEP_BETWEEN_RETRIES_SECONDS = 5
+ZENMARKET_SLEEP_BETWEEN_ITEMS_SECONDS = 2
+ZENMARKET_BACKOFF_MULTIPLIER = 2
+ZENMARKET_MAX_TOTAL_MINUTES_PER_RUN = 60
+ZENMARKET_MAX_CONSECUTIVE_ERRORS = 10
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -57,9 +75,11 @@ MAX_TELEGRAM_ALERTS_PER_RUN = 7
 # ----- Google Sheets export (optional) -----
 GOOGLE_SHEETS_ENABLED = env_bool("GOOGLE_SHEETS_ENABLED", False)
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Pokemon Deals Watch")
-GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "Deals")
+GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "Historique")
 GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "google_service_account.json")
 PREFER_BUY_NOW = env_bool("PREFER_BUY_NOW", True)
+ENDING_SOON_MINUTES = 180
+ENDING_VERY_SOON_MINUTES = 60
 
 # ----- Automatic market price resolver (safe by default) -----
 AUTO_PRICE_ENABLED = env_bool("AUTO_PRICE_ENABLED", False)
@@ -109,6 +129,17 @@ GLOBAL_BLACKLIST_KEYWORDS = [
     "中国版",
     "デジタル",
     "画像のみ",
+    "PSA",
+    "PSA10",
+    "PSA9",
+    "ARS",
+    "ARS10",
+    "CGC",
+    "BGS",
+    "鑑定品",
+    "鑑定",
+    "ケース付き",
+    "スラブ",
 ]
 
 # Each rule is independent and can use a different market estimate / risk profile.
@@ -138,11 +169,11 @@ SEARCH_RULES = [
         "blacklist_keywords": [],
     },
     {
-        "name": "Pokemon PSA10",
-        "query": "ポケモンカード PSA10",
-        "market_price_eur": 80.0,
-        "max_price_yen": 14000,
-        "required_keywords": ["PSA10"],
+        "name": "Pokemon loose good condition",
+        "query": "ポケモンカード SR 美品",
+        "market_price_eur": 0.0,
+        "max_price_yen": 18000,
+        "required_keywords": ["美品"],
         "blacklist_keywords": [],
     },
     {
@@ -167,13 +198,19 @@ LISTING_TYPE_KEYWORDS = {
 KEYWORDS_BUY_NOW_FILE = "keywords_buy_now.txt"
 KEYWORDS_AUCTION_FILE = "keywords_auction.txt"
 KEYWORDS_LOTS_FILE = "keywords_lots.txt"
+KEYWORDS_LOOSE_CARDS_FILE = "keywords_loose_cards.txt"
 BLACKLIST_WORDS_FILE = "blacklist_words.txt"
 
 # If text files are missing, these defaults are used.
 KEYWORDS_BUY_NOW_DEFAULT = [
     "ポケモンカード BOX 即決",
     "ポケカ BOX 即決",
+    "ポケモンカード 未開封BOX 即決",
+    "ポケカ 未開封BOX 即決",
     "ポケモンカード シュリンク付き 即決",
+    "ポケモンカード 新品未開封 BOX 即決",
+    "ポケモンカード ハイクラスパック BOX 即決",
+    "ポケモンカード 絶版BOX 即決",
     "ポケモンカード 未開封 即決",
     "ポケモンカード 151 BOX 即決",
     "ポケモンカード151 BOX 即決",
@@ -188,8 +225,8 @@ KEYWORDS_BUY_NOW_DEFAULT = [
     "イーブイヒーローズ BOX 即決",
     "蒼空ストリーム BOX 即決",
     "白熱のアルカナ BOX 即決",
-    "ポケモンカード PSA10 即決",
-    "ポケカ PSA10 即決",
+    "レイジングサーフ BOX 即決",
+    "スペシャルBOX ポケモンカード 即決",
     "ポケモンカード まとめ売り 即決",
     "ポケモンカード 引退品 即決",
 ]
@@ -229,10 +266,31 @@ KEYWORDS_LOTS_DEFAULT = [
     "ポケカ 引退品",
     "ポケモンカード コレクション 引退",
     "ポケモンカード 旧裏 まとめ",
+    "ポケモンカードゲーム 旧裏 旧裏面 まとめ売り",
+    "ポケモンカード 旧裏 まとめ売り",
+    "ポケモンカード 旧裏面 まとめ売り",
+    "ポケカ 旧裏 まとめ売り",
+    "ポケモンカード 旧裏 大量",
+    "ポケモンカード 旧裏 引退品",
+    "ポケモンカード 旧裏 セット",
     "ポケモンカード キラ まとめ売り",
     "ポケモンカード SR SAR まとめ売り",
     "ポケモンカード プロモ まとめ売り",
-    "ポケモンカード PSA まとめ売り",
+]
+
+KEYWORDS_LOOSE_CARDS_DEFAULT = [
+    "ポケモンカード SR 美品",
+    "ポケモンカード SAR 美品",
+    "ポケモンカード AR 美品",
+    "ポケモンカード CHR 美品",
+    "ポケモンカード CSR 美品",
+    "ポケモンカード プロモ 美品",
+    "ポケモンカード キラ 美品",
+    "ポケカ SR 美品",
+    "ポケカ SAR 美品",
+    "ポケカ プロモ 美品",
+    "ポケモンカード まとめ売り 美品",
+    "ポケカ まとめ売り 美品",
 ]
 
 # Rule defaults for generated keyword searches
@@ -247,4 +305,8 @@ AUCTION_RULE_DEFAULTS = {
 LOTS_RULE_DEFAULTS = {
     "market_price_eur": 220.0,
     "max_price_yen": 30000,
+}
+LOOSE_RULE_DEFAULTS = {
+    "market_price_eur": 0.0,
+    "max_price_yen": 18000,
 }
