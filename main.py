@@ -716,6 +716,37 @@ PRESERVED_SHEET_FIELDS = [
     "manual_price_confidence",
     "manual_status",
 ]
+FRENCH_PRODUCT_NAME_MAP = [
+    ("ポケモンカード151", "Pokémon 151"),
+    ("ポケモンカード 151", "Pokémon 151"),
+    ("151 BOX", "Pokémon 151"),
+    ("151", "Pokémon 151"),
+    ("テラスタルフェス", "Festival Téracristal"),
+    ("シャイニートレジャー", "Trésor Brillant"),
+    ("クレイバースト", "Explosion d’Argile"),
+    ("スノーハザード", "Danger Neigeux"),
+    ("黒炎の支配者", "Souverain des Flammes Noires"),
+    ("VSTARユニバース", "Univers VSTAR"),
+    ("VMAXクライマックス", "Climax VMAX"),
+    ("ロストアビス", "Abysse Perdu"),
+    ("イーブイヒーローズ", "Héros d’Évoli"),
+    ("蒼空ストリーム", "Flux Céleste"),
+    ("白熱のアルカナ", "Arcane Incandescent"),
+    ("レイジングサーフ", "Surf Déchaîné"),
+    ("双璧のファイター", "Combattants Jumelés"),
+]
+SEALED_BOX_TITLE_KEYWORDS = ["BOX", "未開封BOX", "シュリンク付き", "新品未開封", "ハイクラスパック"]
+LOT_TITLE_KEYWORDS = ["まとめ売り", "大量", "引退品", "セット", "まとめ"]
+LOOSE_CARD_TITLE_KEYWORDS = ["SR", "SAR", "AR", "CHR", "CSR", "プロモ", "キラ", "美品"]
+RARITY_QUERY_LABELS = [
+    ("SAR", "SAR"),
+    ("CSR", "CSR"),
+    ("CHR", "CHR"),
+    ("AR", "AR"),
+    ("SR", "SR"),
+    ("プロモ", "Promo"),
+    ("キラ", "Holo"),
+]
 GOOGLE_SHEET_MIGRATIONS = [
     (GOOGLE_LEGACY_BEST_WORKSHEET_NAME, GOOGLE_BEST_WORKSHEET_NAME),
     (GOOGLE_LEGACY_NEEDS_PRICE_WORKSHEET_NAME, GOOGLE_NEEDS_PRICE_WORKSHEET_NAME),
@@ -872,6 +903,88 @@ def match_product_alias(title: str, aliases: List[ProductAliasEntry]) -> Optiona
         if entry.japanese_keyword.casefold() in title_folded:
             return entry
     return None
+
+
+def detect_french_product_name(title: str, detected_product: str = "") -> tuple[str, str]:
+    haystack = combine_context(title or "", detected_product or "")
+    for keyword, french_name in FRENCH_PRODUCT_NAME_MAP:
+        if keyword and keyword in haystack:
+            return keyword, french_name
+    cleaned_detected = (detected_product or "").strip()
+    return cleaned_detected, ""
+
+
+def detect_query_rarity_label(title: str) -> str:
+    for keyword, label in RARITY_QUERY_LABELS:
+        if keyword in (title or ""):
+            return label
+    return ""
+
+
+def normalize_product_search_terms(title: str, detected_product: Optional[str] = None) -> Dict[str, str]:
+    title = (title or "").strip()
+    detected_product = (detected_product or "").strip()
+    product_jp, product_fr = detect_french_product_name(title, detected_product)
+    rarity_label = detect_query_rarity_label(title)
+    language_suffix_fr = "Japonais"
+
+    category = "unknown"
+    if is_old_back_lot(title):
+        category = "old_back_lot"
+    elif contains_any_keyword(title, SEALED_BOX_TITLE_KEYWORDS):
+        category = "sealed_box" if contains_any_keyword(title, ["シュリンク付き", "未開封BOX", "新品未開封"]) else "booster_box"
+    elif contains_any_keyword(title, LOT_TITLE_KEYWORDS):
+        category = "lot"
+    elif contains_any_keyword(title, LOOSE_CARD_TITLE_KEYWORDS):
+        category = "loose_card"
+
+    search_name_fr = product_fr or "Cartes Pokémon japonaises"
+    if category == "sealed_box":
+        base_query = f"{product_fr} Display Japonais" if product_fr else "Display Pokémon Japonais"
+        cardmarket_query = base_query
+        ebay_sold_query = f"{base_query} JP"
+        pricecharting_query = base_query
+    elif category == "booster_box":
+        base_query = f"{product_fr} Booster Box Japonaise" if product_fr else "Booster Box Pokémon Japonaise"
+        cardmarket_query = base_query
+        ebay_sold_query = f"{base_query} JP"
+        pricecharting_query = base_query
+    elif category == "old_back_lot":
+        suffix = f" {product_fr}" if product_fr else ""
+        cardmarket_query = f"lot cartes Pokémon japonaises dos ancien{suffix}".strip()
+        ebay_sold_query = f"lot Pokémon japonais old back{suffix} JP".strip()
+        pricecharting_query = f"lot cartes Pokémon japonaises dos ancien{suffix}".strip()
+        search_name_fr = "Lot cartes Pokémon japonaises dos ancien"
+    elif category == "lot":
+        suffix = f" {product_fr}" if product_fr else ""
+        cardmarket_query = f"lot cartes Pokémon japonaises{suffix}".strip()
+        ebay_sold_query = f"lot cartes Pokémon japonaises{suffix} JP".strip()
+        pricecharting_query = f"lot cartes Pokémon japonaises{suffix}".strip()
+        search_name_fr = (f"Lot cartes Pokémon japonaises {product_fr}".strip() if product_fr else "Lot cartes Pokémon japonaises")
+    elif category == "loose_card":
+        detail_label = product_fr or rarity_label or "carte"
+        rarity_suffix = f" {rarity_label}" if rarity_label and rarity_label not in detail_label else ""
+        cardmarket_query = f"carte Pokémon japonaise {detail_label}{rarity_suffix}".strip()
+        ebay_sold_query = f"carte Pokémon japonaise {detail_label}{rarity_suffix} JP".strip()
+        pricecharting_query = f"carte Pokémon japonaise {detail_label}{rarity_suffix}".strip()
+        search_name_fr = f"Carte Pokémon japonaise {detail_label}{rarity_suffix}".strip()
+    else:
+        suffix = f" {product_fr}" if product_fr else ""
+        cardmarket_query = f"cartes Pokémon japonaises{suffix}".strip()
+        ebay_sold_query = f"cartes Pokémon japonaises{suffix} JP".strip()
+        pricecharting_query = f"cartes Pokémon japonaises{suffix}".strip()
+        search_name_fr = (f"Cartes Pokémon japonaises {product_fr}".strip() if product_fr else "Cartes Pokémon japonaises")
+
+    return {
+        "product_jp": product_jp,
+        "product_fr": product_fr,
+        "category": category,
+        "language_suffix_fr": language_suffix_fr,
+        "search_name_fr": search_name_fr,
+        "cardmarket_query": cardmarket_query,
+        "ebay_sold_query": ebay_sold_query,
+        "pricecharting_query": pricecharting_query,
+    }
 
 
 def confidence_at_least(confidence: str, minimum: str) -> bool:
@@ -3111,14 +3224,17 @@ def build_sheet_row(
         auto_price_last_checked = resolved_price.auto_price_last_checked
 
     matched_product_japanese = alias_match.japanese_keyword if alias_match else ""
-    search_name_fr = alias_match.search_name_fr if alias_match else ""
-    search_name_en = alias_match.search_name_en if alias_match else ""
-    cardmarket_query = alias_match.cardmarket_query if alias_match else ""
-    ebay_query = alias_match.ebay_query if alias_match else ""
-    pricecharting_query = alias_match.pricecharting_query if alias_match else ""
+    normalized_search = normalize_product_search_terms(title, detected_product=matched_product_japanese)
+    matched_product_japanese = normalized_search.get("product_jp", "") or matched_product_japanese
+    search_name_fr = normalized_search.get("search_name_fr", "") or (alias_match.search_name_fr if alias_match else "")
+    search_name_en = search_name_fr or (alias_match.search_name_en if alias_match else "")
+    cardmarket_query = normalized_search.get("cardmarket_query", "") or (alias_match.cardmarket_query if alias_match else "")
+    ebay_query = normalized_search.get("ebay_sold_query", "") or (alias_match.ebay_query if alias_match else "")
+    pricecharting_query = normalized_search.get("pricecharting_query", "") or (alias_match.pricecharting_query if alias_match else "")
 
     fallback_query = (
-        cardmarket_query
+        search_name_fr
+        or cardmarket_query
         or ebay_query
         or pricecharting_query
         or matched_product_japanese
