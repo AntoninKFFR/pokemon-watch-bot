@@ -158,6 +158,16 @@ ZENMARKET_BUY_NOW_PRICE_RE = re.compile(
     r"(?:\[[^\]]*\])?\s*(?:\*+)?\s*(?:\n|\r|\s)*[¥￥]\s*([0-9,]+)",
     re.IGNORECASE,
 )
+ZENMARKET_CURRENT_PRICE_EUR_RE = re.compile(
+    r"(?:Current price|Current bid|Prix actuel|Ench[eè]re actuelle|現在価格|入札価格)\s*(?:\[[^\]]*\])?\s*(?:\*+)?"
+    r"(?:.|\n|\r){0,80}?[€]\s*([0-9]+(?:[.,][0-9]{1,2})?)",
+    re.IGNORECASE,
+)
+ZENMARKET_BUY_NOW_PRICE_EUR_RE = re.compile(
+    r"(?:Buyout price|Buy now|Instant purchase|Prix d['’]achat imm[eé]diat|Acheter maintenant|即決価格|即決|Buyout)\s*"
+    r"(?:\[[^\]]*\])?\s*(?:\*+)?(?:.|\n|\r){0,80}?[€]\s*([0-9]+(?:[.,][0-9]{1,2})?)",
+    re.IGNORECASE,
+)
 ZENMARKET_BID_COUNT_RE = re.compile(
     r"(?:Number of bids|Bid count|Nombre d['’]ench[eè]res|入札件数|入札)\s*:?\**\s*([0-9,]+)",
     re.IGNORECASE,
@@ -259,14 +269,12 @@ GOOGLE_DEALS_HEADERS = [
     "opportunity_type",
     "title",
     "time_left",
-    "time_left_minutes",
-    "auction_ending_soon",
     "auction_is_ended",
     "price_yen",
-    "current_price_yen",
+    "price_eur",
     "buy_now_price_yen",
+    "buy_now_price_eur",
     "bid_count",
-    "total_cost_eur",
     "market_price_eur",
     "profit_eur",
     "roi_percent",
@@ -308,16 +316,17 @@ GOOGLE_BEST_DEALS_HEADERS = [
     "opportunity_type",
     "title",
     "time_left",
-    "time_left_minutes",
-    "auction_ending_soon",
     "price_yen",
-    "current_price_yen",
+    "price_eur",
     "buy_now_price_yen",
-    "total_cost_eur",
+    "buy_now_price_eur",
     "market_price_eur",
     "profit_eur",
     "roi_percent",
     "price_source",
+    "cardmarket_search_url",
+    "ebay_sold_search_url",
+    "pricecharting_search_url",
     "link_for_zenmarket",
     "notes",
     "url",
@@ -380,12 +389,10 @@ GOOGLE_NEEDS_PRICE_HEADERS = [
     "opportunity_type",
     "title",
     "time_left",
-    "time_left_minutes",
-    "auction_ending_soon",
     "price_yen",
-    "current_price_yen",
+    "price_eur",
     "buy_now_price_yen",
-    "total_cost_eur",
+    "buy_now_price_eur",
     "manual_market_price_eur",
     "price_source",
     "cardmarket_search_url",
@@ -427,9 +434,11 @@ GOOGLE_HEADER_LABELS = {
     "listing_type_reason": "Raison type",
     "title": "Titre",
     "price_yen": "Prix Japon ¥",
+    "price_eur": "Prix Japon €",
     "price_source": "Source prix achat",
     "current_price_yen": "Prix actuel ¥",
     "buy_now_price_yen": "Prix achat immédiat ¥",
+    "buy_now_price_eur": "Prix achat immédiat €",
     "time_left_minutes": "Minutes restantes",
     "auction_end_at": "Fin enchère",
     "auction_ending_soon": "Fin bientôt",
@@ -1164,8 +1173,10 @@ FIXED_COLUMN_WIDTHS = {
     "ebay_sold_search_url": 140,
     "pricecharting_search_url": 140,
     "price_yen": 105,
+    "price_eur": 105,
     "current_price_yen": 105,
     "buy_now_price_yen": 120,
+    "buy_now_price_eur": 120,
     "total_cost_eur": 115,
     "market_price_eur": 110,
     "profit_eur": 110,
@@ -1944,6 +1955,29 @@ def parse_yen_amount(text: str) -> Optional[int]:
         return int(amount)
     except ValueError:
         return None
+
+
+def parse_eur_amount(text: str) -> Optional[float]:
+    cleaned = (text or "").strip().replace(",", ".")
+    if not cleaned:
+        return None
+    try:
+        return round(float(cleaned), 2)
+    except ValueError:
+        return None
+
+
+def yen_to_eur_value(yen_amount: object) -> float:
+    amount = to_float(yen_amount)
+    if amount <= 0 or config.EUR_TO_JPY <= 0:
+        return 0.0
+    return round(amount / config.EUR_TO_JPY, 2)
+
+
+def format_eur_value(value: Optional[float]) -> str:
+    if value is None or value <= 0:
+        return ""
+    return f"{value:.2f}"
 
 
 def combine_context(*parts: str) -> str:
@@ -3310,6 +3344,14 @@ def build_sheet_row(
     )
     opportunity_type = compute_opportunity_type(listing_type, buy_now_price_yen)
     price_source = choose_price_source(deal, listing_metadata, fallback="yahoo_search")
+    current_price_eur = parse_eur_amount(str(listing_metadata.get("current_price_eur", "") or ""))
+    buy_now_price_eur = parse_eur_amount(str(listing_metadata.get("buy_now_price_eur", "") or ""))
+    if current_price_eur is None and current_price_yen:
+        current_price_eur = yen_to_eur_value(current_price_yen)
+    if buy_now_price_eur is None and buy_now_price_yen:
+        buy_now_price_eur = yen_to_eur_value(buy_now_price_yen)
+    price_eur = current_price_eur if current_price_eur is not None and current_price_eur > 0 else yen_to_eur_value(price_yen)
+    buy_now_price_eur_value = buy_now_price_eur if buy_now_price_eur is not None and buy_now_price_eur > 0 else yen_to_eur_value(buy_now_price_yen or 0)
     total_cost_yen = (
         price_yen
         + config.ZENMARKET_SERVICE_FEE_YEN
@@ -3395,9 +3437,11 @@ def build_sheet_row(
         "title": title,
         "opportunity_type": opportunity_type,
         "price_yen": str(price_yen or ""),
+        "price_eur": format_eur_value(price_eur),
         "price_source": price_source,
         "current_price_yen": listing_metadata.get("current_price_yen", ""),
         "buy_now_price_yen": listing_metadata.get("buy_now_price_yen", ""),
+        "buy_now_price_eur": format_eur_value(buy_now_price_eur_value),
         "bid_count": listing_metadata.get("bid_count", ""),
         "time_left": listing_metadata.get("time_left", ""),
         "time_left_minutes": listing_metadata.get("time_left_minutes", ""),
@@ -3832,8 +3876,16 @@ def parse_zenmarket_listing_metadata(text: str) -> Dict[str, str]:
             return ""
         return match.group(1).replace(",", "").strip()
 
+    def _extract_raw(pattern: re.Pattern[str]) -> str:
+        match = pattern.search(haystack)
+        if not match:
+            return ""
+        return match.group(1).strip()
+
     current_price = _extract(ZENMARKET_CURRENT_PRICE_RE)
     buy_now_price = _extract(ZENMARKET_BUY_NOW_PRICE_RE)
+    current_price_eur = parse_eur_amount(_extract_raw(ZENMARKET_CURRENT_PRICE_EUR_RE))
+    buy_now_price_eur = parse_eur_amount(_extract_raw(ZENMARKET_BUY_NOW_PRICE_EUR_RE))
     bid_count = _extract(ZENMARKET_BID_COUNT_RE)
     time_left = ""
     time_left_match = ZENMARKET_TIME_LEFT_RE.search(haystack)
@@ -3877,7 +3929,9 @@ def parse_zenmarket_listing_metadata(text: str) -> Dict[str, str]:
 
     return {
         "current_price_yen": current_price,
+        "current_price_eur": format_eur_value(current_price_eur),
         "buy_now_price_yen": buy_now_price,
+        "buy_now_price_eur": format_eur_value(buy_now_price_eur),
         "bid_count": bid_count,
         "time_left": time_left,
         "time_left_minutes": str(time_left_minutes) if time_left_minutes is not None else "",
@@ -5238,7 +5292,7 @@ def _sync_mode_emploi_worksheet(spreadsheet: object) -> bool:
         ["Opportunités"],
         ["Onglet principal à regarder pour décider quoi acheter."],
         ["Pas de saisie manuelle de prix ici."],
-        ["Regarder surtout Prix Japon ¥, Prix actuel ¥, Prix achat immédiat ¥, Coût total estimé €, Prix marché €, Marge estimée € et ROI %."],
+        ["Regarder surtout Temps restant, Prix Japon ¥, Prix achat immédiat ¥, Prix marché €, Marge estimée € et ROI %."],
         ["Toutes les lignes doivent idéalement avoir Source prix achat = Détail ZenMarket quand possible."],
         [""],
         ["Prix à remplir"],
@@ -5249,11 +5303,13 @@ def _sync_mode_emploi_worksheet(spreadsheet: object) -> bool:
         ["Historique"],
         ["Historique complet / debug, utile pour contrôler les annonces ignorées ou déjà terminées."],
         ["Les tableaux sont triés pour afficher en priorité les enchères qui se terminent le plus vite. Les enchères terminées restent uniquement dans Historique et sont placées tout en bas."],
+        ["L’interface Google Sheets est volontairement épurée : certaines colonnes techniques utiles au calcul restent internes au bot mais ne sont plus affichées."],
         [""],
         ["Définitions utiles"],
         ["Prix Japon ¥ = prix utilisé pour calculer le coût."],
-        ["Prix actuel ¥ = prix actuel de l’enchère."],
+        ["Prix Japon € = équivalent simple du prix produit, sans frais."],
         ["Prix achat immédiat ¥ = achat direct si disponible."],
+        ["Prix achat immédiat € = équivalent simple du prix d’achat immédiat, sans frais."],
         ["Source prix achat = source du prix d’achat, idéalement Détail ZenMarket."],
         ["Prix revente manuel € = prix que vous renseignez vous-même."],
         ["Prix marché € = prix utilisé pour calculer la rentabilité."],
